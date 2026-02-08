@@ -1,0 +1,41 @@
+# MentorGold Python Backend - FastAPI
+# ==========================================
+
+# Core Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# Database & Auth
+supabase==2.3.4
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+razorpay==1.4.2
+
+# Google API
+google-api-python-client==2.114.0
+google-auth==2.26.2
+google-auth-oauthlib==1.2.0
+
+# Validation & Serialization
+pydantic==2.10.6
+pydantic-settings==2.7.1
+email-validator==2.1.0
+
+# HTTP & Utilities
+httpx==0.24.1
+python-dotenv==1.0.0
+aiofiles==23.2.1
+
+# Rate Limiting & Security
+slowapi==0.1.9
+
+# Logging
+loguru==0.7.2
+
+# Development
+pytest==7.4.4
+pytest-asyncio==0.23.3
+black==23.12.1
+isort==5.13.2
+mypy==1.8.0
