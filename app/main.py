@@ -13,7 +13,7 @@ from loguru import logger
 import sys
 
 from app.config.settings import settings
-from app.routes import sessions, mentors, meetings, notifications, payments, wallets
+from app.routes import sessions, mentors, meetings, notifications, payments, wallets, calcom, chat
 from app.middleware.error_handler import app_exception_handler, AppError
 
 
@@ -34,6 +34,14 @@ limiter = Limiter(key_func=get_remote_address)
 async def lifespan(app: FastAPI):
     """Application lifespan events"""
     logger.info("🚀 Starting MentorGold API Server...")
+    jwt_secret = settings.supabase_jwt_secret
+    if not jwt_secret or not jwt_secret.strip():
+        logger.warning(
+            "⚠️  SUPABASE_JWT_SECRET not set. Auth may fail with 401. "
+            "See python-backend/AUTH_SETUP.md to fix."
+        )
+    else:
+        logger.info("✓ SUPABASE_JWT_SECRET loaded for auth")
     yield
     logger.info("👋 Shutting down MentorGold API Server...")
 
@@ -120,6 +128,8 @@ app.include_router(meetings.router, prefix="/api/meetings", tags=["Meetings"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["Notifications"])
 app.include_router(payments.router, prefix="/api/payments", tags=["Payments"])
 app.include_router(wallets.router, prefix="/api/wallets", tags=["Wallets"])
+app.include_router(calcom.router, prefix="/api/calcom", tags=["Cal.com"])
+app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
 
 
 # =====================================================

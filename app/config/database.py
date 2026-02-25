@@ -50,14 +50,15 @@ def get_supabase_with_token(user_token: str) -> Client:
     Returns:
         Supabase client configured with user token
     """
+    from supabase import ClientOptions
+    
+    options = ClientOptions()
+    options.headers = {"Authorization": f"Bearer {user_token}"}
+    
     client = create_client(
         settings.supabase_url,
         settings.supabase_anon_key,
-        options={
-            "headers": {
-                "Authorization": f"Bearer {user_token}"
-            }
-        }
+        options
     )
     return client
 

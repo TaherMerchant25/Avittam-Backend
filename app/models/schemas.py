@@ -326,6 +326,13 @@ class VerifyPayment(BaseModel):
     razorpay_signature: str
 
 
+class CreateRegistrationOrder(BaseModel):
+    """Mentee registration fee order (unauthenticated)"""
+    email: str
+    name: str  # Full name, will be split into first/last
+    amount: int  # Amount in paise
+
+
 # =====================================================
 # GOOGLE CALENDAR / MEET SCHEMAS
 # =====================================================

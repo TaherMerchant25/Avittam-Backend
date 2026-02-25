@@ -8,7 +8,7 @@ from typing import Optional, List, Dict, Any
 from loguru import logger
 
 from app.config.database import get_supabase_admin
-from app.services.notifications import create_notification, broadcast_notifications
+from app.services.notifications import create_notification
 from app.models.schemas import (
     MentorRequest,
     CreateMentorRequestInput,
@@ -74,10 +74,11 @@ async def broadcast_ping(
     mentee_id: str,
     input_data: BroadcastPingInput
 ) -> Dict[str, Any]:
-    """Broadcast a ping to all or specific mentors"""
-    supabase = get_supabase_admin()
-    
-    # Create the mentor request first
+    """
+    Broadcast a ping to mentors. Creates request in DB - the trigger
+    broadcast_request_to_mentors() automatically notifies all mentors.
+    Returns immediately for fast UX.
+    """
     request = await create_mentor_request(mentee_id, CreateMentorRequestInput(
         title=input_data.title,
         description=input_data.description,
@@ -87,60 +88,17 @@ async def broadcast_ping(
         preferred_date=input_data.preferred_date,
         duration_minutes=input_data.duration_minutes,
     ))
-    
-    # Get mentee info for notification message
-    mentee_result = supabase.table("users").select("name").eq("id", mentee_id).single().execute()
-    mentee_name = mentee_result.data["name"] if mentee_result.data else "A mentee"
-    
-    # Build query to get target mentors
-    mentor_query = supabase.table("users").select("id, email, name").eq(
+
+    # Count mentors for response (lightweight)
+    supabase = get_supabase_admin()
+    count_result = supabase.table("users").select("id", count="exact").eq(
         "role", "mentor"
-    ).eq("is_active", True)
-    
-    # Filter by specific mentor IDs if provided
-    if input_data.target_mentors:
-        mentor_query = mentor_query.in_("id", input_data.target_mentors)
-    
-    mentors_result = mentor_query.execute()
-    target_mentors = mentors_result.data or []
-    
-    # If expertise filter provided, filter by mentor profiles
-    if input_data.expertise_filter and target_mentors:
-        mentor_ids = [m["id"] for m in target_mentors]
-        profiles_result = supabase.table("user_profiles").select(
-            "user_id, expertise"
-        ).in_("user_id", mentor_ids).not_.is_("expertise", "null").execute()
-        
-        if profiles_result.data:
-            matching_user_ids = []
-            for profile in profiles_result.data:
-                expertise = profile.get("expertise") or []
-                if any(
-                    any(f.lower() in e.lower() for f in input_data.expertise_filter)
-                    for e in expertise
-                ):
-                    matching_user_ids.append(profile["user_id"])
-            
-            target_mentors = [m for m in target_mentors if m["id"] in matching_user_ids]
-    
-    # Send notifications to all target mentors
-    if target_mentors:
-        mentor_ids = [m["id"] for m in target_mentors]
-        await broadcast_notifications(
-            mentor_ids,
-            {
-                "type": "request",
-                "title": "🔔 New Mentorship Request",
-                "message": f"{mentee_name} is looking for help with: {input_data.title}",
-                "related_entity_type": "mentor_request",
-                "related_entity_id": request["id"],
-                "action_url": f"/requests/{request['id']}",
-            }
-        )
-    
+    ).eq("is_active", True).execute()
+    mentor_count = count_result.count or 0
+
     return {
         "request": request,
-        "notified_mentors": len(target_mentors),
+        "notified_mentors": mentor_count,
     }
 
 

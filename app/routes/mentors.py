@@ -53,12 +53,12 @@ async def broadcast_ping(
     request: BroadcastPingInput,
     user: User = Depends(get_current_user)
 ):
-    """Broadcast a ping to mentors"""
+    """Broadcast a ping to mentors. Request is created in DB; trigger notifies all mentors in real-time."""
     if not request.title or not request.topic:
         raise BadRequestError("Title and topic are required")
-    
+
     result = await mentor_service.broadcast_ping(user.id, request)
-    
+
     return {
         "success": True,
         "data": result["request"],

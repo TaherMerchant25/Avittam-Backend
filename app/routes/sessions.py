@@ -3,11 +3,16 @@
 # HTTP endpoints for session management
 # =====================================================
 
+import hmac
+import hashlib
 from fastapi import APIRouter, Depends, Query
 from typing import Optional, List
 from datetime import datetime
+from pydantic import BaseModel
 
-from app.middleware.auth import get_current_user
+from app.middleware.auth import get_current_user, require_mentee
+from app.config.database import get_supabase_admin
+from app.config.settings import settings
 from app.models.schemas import (
     User,
     CreateSessionRequest,
@@ -21,9 +26,223 @@ from app.models.schemas import (
     PaginationInfo,
 )
 from app.services import sessions as session_service
+from app.services import session_booking as booking_service
+from app.services.wallets import credit_mentor_for_session_payment
+from app.middleware.error_handler import BadRequestError, NotFoundError
 
 
 router = APIRouter()
+
+
+# =====================================================
+# SESSION BOOKING (must be before /{session_id})
+# =====================================================
+class BookSessionBody(BaseModel):
+    mentorId: str
+    amountInr: float
+    scheduledAt: Optional[str] = None
+    durationMinutes: Optional[int] = None
+
+
+class BookWithCoinsBody(BaseModel):
+    mentorId: str
+    totalCoins: float
+    scheduledAt: Optional[str] = None
+    durationMinutes: Optional[int] = None
+
+
+@router.post("/book/coins")
+async def book_session_with_coins(body: BookWithCoinsBody, user: User = Depends(require_mentee)):
+    """Create session + pay with Avittam Coins + credit mentor + create chat immediately"""
+    if user.role.value not in ("mentee", "admin"):
+        raise BadRequestError("Only mentees can book sessions")
+    if not body.mentorId or not body.totalCoins or body.totalCoins <= 0:
+        raise BadRequestError("mentorId and totalCoins (positive) are required")
+
+    supabase = get_supabase_admin()
+    mentor_result = supabase.table("users").select("id, name, avatar_url").eq(
+        "id", body.mentorId
+    ).eq("is_active", True).single().execute()
+    if not mentor_result.data:
+        raise NotFoundError("Mentor not found or inactive")
+    mentor = mentor_result.data
+
+    mentee_result = supabase.table("users").select("name, avatar_url").eq("id", user.id).single().execute()
+    mentee_data = mentee_result.data or {}
+
+    session_id = booking_service.create_session(
+        body.mentorId, user.id, body.scheduledAt, body.durationMinutes or 60
+    )
+
+    from app.services.wallets import pay_for_session_with_coins
+    result = pay_for_session_with_coins(
+        mentee_id=user.id,
+        session_id=session_id,
+        mentor_id=body.mentorId,
+        total_coins=body.totalCoins,
+        settle_immediately=True,
+    )
+
+    stream_channel_id = None
+    try:
+        from app.services import stream_chat as stream_chat_service
+        if stream_chat_service.is_stream_chat_configured():
+            stream_channel_id = booking_service.create_chat_channel_for_session(
+                session_id, body.mentorId, user.id, None,
+                mentor.get("name", "Mentor"), mentee_data.get("name", "Student"),
+                mentor.get("avatar_url"), mentee_data.get("avatar_url"),
+                "Mentorship Session Chat",
+            )
+            supabase.table("notifications").insert({
+                "user_id": body.mentorId,
+                "type": "chat",
+                "title": "New Session Booked! 💬",
+                "message": f"{user.name or 'A student'} has booked a session with you. Chat is now unlocked.",
+                "related_entity_type": "chat_channel",
+                "related_entity_id": session_id,
+                "action_url": f"/chat/{stream_channel_id}",
+            }).execute()
+    except Exception as e:
+        from loguru import logger
+        logger.warning(f"Could not create chat channel: {e}")
+
+    return {
+        "success": True,
+        "sessionId": session_id,
+        "streamChannelId": stream_channel_id,
+        "newBalance": result["new_balance"],
+        "message": result["message"],
+    }
+
+
+@router.post("/book")
+async def book_session(body: BookSessionBody, user: User = Depends(require_mentee)):
+    """Create session + payment + Razorpay order"""
+    if user.role.value not in ("mentee", "admin"):
+        raise BadRequestError("Only mentees can book sessions")
+    if not body.mentorId or not body.amountInr or body.amountInr <= 0:
+        raise BadRequestError("mentorId and amountInr (positive) are required")
+
+    supabase = get_supabase_admin()
+    mentor_result = supabase.table("users").select("id, name, avatar_url").eq(
+        "id", body.mentorId
+    ).eq("is_active", True).single().execute()
+    if not mentor_result.data:
+        raise NotFoundError("Mentor not found or inactive")
+    mentor = mentor_result.data
+
+    session_id = booking_service.create_session(
+        body.mentorId, user.id, body.scheduledAt, body.durationMinutes or 60
+    )
+    payment_id = booking_service.create_payment(
+        user.id, session_id, body.amountInr,
+        f"Session booking with {mentor['name']}",
+        {"type": "session_booking", "mentor_id": body.mentorId},
+    )
+    amount_paise = int(body.amountInr * 100)
+    receipt = f"book_{session_id[:8]}_{int(__import__('time').time() * 1000)}"
+    order = booking_service.create_razorpay_order(amount_paise, receipt, {
+        "session_id": session_id,
+        "payment_id": payment_id,
+        "type": "session_booking",
+    })
+    supabase.table("payments").update({"razorpay_order_id": order["id"]}).eq("id", payment_id).execute()
+
+    return {
+        "success": True,
+        "sessionId": session_id,
+        "orderId": order["id"],
+        "keyId": settings.razorpay_key_id,
+        "amount": order["amount"],
+        "currency": order["currency"],
+        "paymentId": payment_id,
+    }
+
+
+class VerifyBookBody(BaseModel):
+    sessionId: str
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+    paymentId: str
+
+
+@router.post("/book/verify")
+async def verify_session_booking(body: VerifyBookBody, user: User = Depends(require_mentee)):
+    """Verify payment and unlock chat"""
+    if not settings.razorpay_key_secret:
+        raise BadRequestError("Razorpay not configured")
+    msg = f"{body.razorpay_order_id}|{body.razorpay_payment_id}"
+    expected = hmac.new(
+        settings.razorpay_key_secret.encode(), msg.encode(), hashlib.sha256
+    ).hexdigest()
+    if expected != body.razorpay_signature:
+        raise BadRequestError("Payment verification failed")
+
+    supabase = get_supabase_admin()
+    from datetime import datetime
+    supabase.table("payments").update({
+        "razorpay_payment_id": body.razorpay_payment_id,
+        "razorpay_signature": body.razorpay_signature,
+        "status": "paid",
+        "paid_at": datetime.now().isoformat(),
+    }).eq("id", body.paymentId).eq("session_id", body.sessionId).execute()
+
+    # Fetch payment to get amount, then credit mentor's wallet (70% of fee)
+    payment_result = supabase.table("payments").select("amount").eq(
+        "id", body.paymentId
+    ).single().execute()
+    amount_inr = float(payment_result.data["amount"]) if payment_result.data else 0
+    if amount_inr > 0:
+        session_result_for_credit = supabase.table("sessions").select(
+            "mentor_id, mentee_id"
+        ).eq("id", body.sessionId).single().execute()
+        if session_result_for_credit.data:
+            credit_mentor_for_session_payment(
+                mentor_id=session_result_for_credit.data["mentor_id"],
+                session_id=body.sessionId,
+                amount_inr=amount_inr,
+                mentee_id=session_result_for_credit.data["mentee_id"],
+                description="Session earning (Razorpay payment)",
+            )
+
+    session_result = supabase.table("sessions").select(
+        "id, mentor_id, mentee_id, mentor:users!mentor_id(id, name, avatar_url), mentee:users!mentee_id(id, name, avatar_url)"
+    ).eq("id", body.sessionId).single().execute()
+    if not session_result.data:
+        raise NotFoundError("Session not found")
+    session = session_result.data
+    if session["mentee_id"] != user.id:
+        raise BadRequestError("Not authorized to verify this booking")
+
+    mentor = session.get("mentor")
+    mentee = session.get("mentee")
+    mentor_data = mentor[0] if isinstance(mentor, list) else mentor or {}
+    mentee_data = mentee[0] if isinstance(mentee, list) else mentee or {}
+
+    stream_channel_id = booking_service.create_chat_channel_for_session(
+        body.sessionId, session["mentor_id"], session["mentee_id"], body.paymentId,
+        mentor_data.get("name", "Mentor"), mentee_data.get("name", "Student"),
+        mentor_data.get("avatar_url"), mentee_data.get("avatar_url"),
+        "Mentorship Session Chat",
+    )
+
+    supabase.table("notifications").insert({
+        "user_id": session["mentor_id"],
+        "type": "chat",
+        "title": "New Session Booked! 💬",
+        "message": f"{user.name or 'A student'} has booked a session with you. Chat is now unlocked.",
+        "related_entity_type": "chat_channel",
+        "related_entity_id": body.sessionId,
+        "action_url": f"/chat/{stream_channel_id}",
+    }).execute()
+
+    return {
+        "success": True,
+        "message": "Session booked successfully",
+        "sessionId": body.sessionId,
+        "streamChannelId": stream_channel_id,
+    }
 
 
 @router.post("", response_model=ApiResponse)

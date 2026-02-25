@@ -5,12 +5,14 @@
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt
+from jose import JWTError, jwt, jwk
+from jose.backends import ECKey
 from typing import Optional
 from loguru import logger
+import httpx
+from functools import lru_cache
 
 from app.config.settings import settings
-from app.config.database import get_supabase_admin
 from app.models.schemas import User, UserRole
 from app.middleware.error_handler import UnauthorizedError
 
@@ -18,34 +20,113 @@ from app.middleware.error_handler import UnauthorizedError
 security = HTTPBearer()
 
 
+@lru_cache(maxsize=1)
+def get_jwks():
+    """Fetch JWKS from Supabase (cached)"""
+    jwks_url = f"{settings.supabase_url}/auth/v1/.well-known/jwks.json"
+    try:
+        response = httpx.get(jwks_url, timeout=10.0)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        logger.error(f"Failed to fetch JWKS: {e}")
+        return None
+
+
 async def verify_token(token: str) -> Optional[dict]:
     """
     Verify JWT token and return payload.
-    Tries Supabase token first, then custom JWT.
+    Tries Supabase token (ES256 with JWKS) first, then custom JWT.
     """
-    supabase = get_supabase_admin()
-    
-    # Try to verify as Supabase JWT
+    # Get the key ID from token header
     try:
-        user_response = supabase.auth.get_user(token)
-        if user_response and user_response.user:
-            return {
-                "sub": user_response.user.id,
-                "email": user_response.user.email,
-            }
+        unverified_header = jwt.get_unverified_header(token)
+        kid = unverified_header.get("kid")
+        alg = unverified_header.get("alg", "ES256")
+        
+        # Try to verify as Supabase JWT using JWKS
+        jwks_data = get_jwks()
+        if jwks_data and kid:
+            # Find the matching key
+            keys = jwks_data.get("keys", [])
+            matching_key = None
+            for key in keys:
+                if key.get("kid") == kid:
+                    matching_key = key
+                    break
+            
+            if matching_key:
+                # Verify token with the public key
+                payload = jwt.decode(
+                    token,
+                    matching_key,
+                    algorithms=[alg],
+                    audience="authenticated",
+                    options={"verify_aud": True}
+                )
+                logger.debug(f"Supabase token verified for user: {payload.get('sub')}")
+                return payload
+    except JWTError as e:
+        logger.debug(f"Supabase JWKS token verification failed: {e}")
     except Exception as e:
-        logger.debug(f"Supabase token verification failed: {e}")
+        logger.debug(f"Token verification error: {e}")
     
-    # Fallback: verify as custom JWT
+    # Fallback: try with JWT secret if configured (HS256)
+    if settings.supabase_jwt_secret:
+        try:
+            payload = jwt.decode(
+                token,
+                settings.supabase_jwt_secret,
+                algorithms=["HS256"],
+                audience="authenticated"
+            )
+            logger.debug(f"Supabase HS256 token verified for user: {payload.get('sub')}")
+            return payload
+        except JWTError as e:
+            logger.debug(f"Supabase HS256 token verification failed: {e}")
+    
+    # Fallback: validate via Supabase Auth API (no JWT secret needed)
+    # Try with anon key first, then service_role (some projects require service_role for server-side)
+    for apikey in [settings.supabase_anon_key, settings.supabase_service_role_key or ""]:
+        if not apikey:
+            continue
+        try:
+            url = f"{settings.supabase_url.rstrip('/')}/auth/v1/user"
+            response = httpx.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "apikey": apikey,
+                    "Content-Type": "application/json",
+                },
+                timeout=10.0,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                user_id = None
+                user_email = None
+                if isinstance(data, dict):
+                    user_id = data.get("id") or (data.get("user") or {}).get("id") or data.get("sub")
+                    user_email = data.get("email") or (data.get("user") or {}).get("email")
+                if user_id:
+                    logger.info(f"Supabase API token verified for user: {user_id}")
+                    return {"sub": user_id, "email": user_email}
+            else:
+                logger.warning(f"Supabase API auth failed: {response.status_code} - {response.text[:400]}")
+        except Exception as e:
+            logger.debug(f"Supabase API attempt failed: {e}")
+
+    # Last fallback: verify as custom JWT
     try:
         payload = jwt.decode(
             token,
             settings.jwt_secret,
             algorithms=[settings.jwt_algorithm]
         )
+        logger.debug(f"Custom JWT verified for user: {payload.get('sub')}")
         return payload
     except JWTError as e:
-        logger.debug(f"JWT verification failed: {e}")
+        logger.debug(f"Custom JWT verification failed: {e}")
         raise UnauthorizedError("Invalid or expired token")
 
 
@@ -70,19 +151,31 @@ async def get_current_user(
         
         user_id = payload["sub"]
         
-        # Fetch user from database
-        supabase = get_supabase_admin()
-        result = supabase.table("users").select("*").eq("id", user_id).single().execute()
-        
-        if not result.data:
+        # Fetch user from database via Supabase REST API (avoids supabase-py Client proxy issue)
+        url = f"{settings.supabase_url.rstrip('/')}/rest/v1/users"
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                url,
+                params={"id": f"eq.{user_id}", "select": "*"},
+                headers={
+                    "apikey": settings.supabase_service_role_key or settings.supabase_anon_key,
+                    "Authorization": f"Bearer {settings.supabase_service_role_key or settings.supabase_anon_key}",
+                    "Accept": "application/json",
+                },
+                timeout=10.0,
+            )
+        if response.status_code != 200:
+            logger.warning(f"Supabase REST users fetch failed: {response.status_code} - {response.text[:200]}")
+            raise UnauthorizedError("User not found")
+        data = response.json()
+        user_data = data[0] if isinstance(data, list) and data else None
+        if not user_data:
             raise UnauthorizedError("User not found")
         
-        user_data = result.data
-        
         return User(
-            id=user_data["id"],
+            id=str(user_data["id"]),
             email=user_data["email"],
-            name=user_data["name"],
+            name=user_data.get("name") or "",
             role=UserRole(user_data["role"]),
             avatar_url=user_data.get("avatar_url"),
             is_verified=user_data.get("is_verified", False),

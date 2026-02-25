@@ -7,7 +7,7 @@ uvicorn[standard]==0.27.0
 python-multipart==0.0.6
 
 # Database & Auth
-supabase==2.3.4
+supabase==2.11.0
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 razorpay==1.4.2
@@ -23,7 +23,7 @@ pydantic-settings==2.7.1
 email-validator==2.1.0
 
 # HTTP & Utilities
-httpx==0.24.1
+httpx==0.28.1
 python-dotenv==1.0.0
 aiofiles==23.2.1
 
@@ -32,6 +32,9 @@ slowapi==0.1.9
 
 # Logging
 loguru==0.7.2
+
+# Stream Chat
+stream-chat>=4.24.0
 
 # Development
 pytest==7.4.4

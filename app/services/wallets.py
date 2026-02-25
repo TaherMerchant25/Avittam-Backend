@@ -20,7 +20,7 @@ from app.middleware.error_handler import BadRequestError, NotFoundError
 # =====================================================
 
 COIN_RATE = 1.0  # 1 INR = 1 Avittam Coin
-MENTOR_REGISTRATION_FEE = 999.0  # Yearly fee (X) for mentors
+MENTOR_REGISTRATION_FEE = 10.0  # Yearly fee (X) for mentors
 
 # MLM-Style Referral Commission Structure (for registration fee)
 ORGANIZATION_SHARE_PCT = 25.0  # Bablu (organization) takes 25% of X
@@ -38,6 +38,56 @@ RATING_BONUS = {
     2: -20.0, # -20% penalty
     1: -30.0  # -30% penalty
 }
+
+
+# Mentor gets 70% of session fee when paid (platform takes 30%)
+MENTOR_SESSION_SHARE_PCT = 70.0
+
+
+def credit_mentor_for_session_payment(
+    mentor_id: str,
+    session_id: str,
+    amount_inr: float,
+    mentee_id: str,
+    description: str = "Session earning (Razorpay payment)",
+) -> Dict[str, Any]:
+    """
+    Credit mentor's mentorship wallet when session is paid (e.g. via Razorpay).
+    Mentor receives 70% of the amount; platform keeps 30%.
+    """
+    supabase = get_supabase_admin()
+    mentor_earning = amount_inr * (MENTOR_SESSION_SHARE_PCT / 100.0)
+    platform_fee = amount_inr - mentor_earning
+
+    mentor_wallet = get_or_create_wallet(mentor_id, "mentorship")
+    mentor_balance = float(mentor_wallet["balance"])
+    new_mentor_balance = mentor_balance + mentor_earning
+
+    supabase.table("wallets").update({
+        "balance": new_mentor_balance,
+        "total_credited": float(mentor_wallet["total_credited"]) + mentor_earning,
+    }).eq("id", mentor_wallet["id"]).execute()
+
+    supabase.table("wallet_transactions").insert({
+        "wallet_id": mentor_wallet["id"],
+        "tx_type": "credit",
+        "category": "session_earning",
+        "amount": mentor_earning,
+        "balance_after": new_mentor_balance,
+        "session_id": session_id,
+        "related_user_id": mentee_id,
+        "description": description,
+    }).execute()
+
+    logger.info(
+        f"Credited mentor {mentor_id} {mentor_earning} coins for session {session_id} "
+        f"(total paid: {amount_inr}, platform fee: {platform_fee})"
+    )
+    return {
+        "mentor_earning": mentor_earning,
+        "platform_fee": platform_fee,
+        "new_balance": new_mentor_balance,
+    }
 
 
 def get_nps_band(score: int) -> str:
@@ -343,11 +393,13 @@ def verify_coin_load(
 # =====================================================
 
 def pay_for_session_with_coins(
-    mentee_id: str, session_id: str, mentor_id: str, total_coins: float
+    mentee_id: str, session_id: str, mentor_id: str, total_coins: float,
+    settle_immediately: bool = True,
 ) -> Dict[str, Any]:
     """
     Debit Avittam Coins from student's wallet to pay for a session.
-    The mentor payout happens AFTER session + NPS rating.
+    When settle_immediately=True (default), mentor receives 70% right away.
+    When False, mentor payout happens after NPS rating.
     """
     supabase = get_supabase_admin()
     
@@ -379,17 +431,43 @@ def pay_for_session_with_coins(
         "description": f"Paid {total_coins} Avittam Coins for session",
     }).execute()
     
-    # Create session_coin_payments record (unsettled – awaits NPS)
+    mentor_earning = total_coins * (MENTOR_SESSION_SHARE_PCT / 100.0) if settle_immediately else 0
+    platform_fee = total_coins - mentor_earning if settle_immediately else 0
+    
+    # Create session_coin_payments record
     scp = {
         "session_id": session_id,
         "mentee_id": mentee_id,
         "mentor_id": mentor_id,
         "total_coins": total_coins,
-        "platform_fee_coins": 0,       # Filled after NPS
-        "mentor_earning_coins": 0,     # Filled after NPS
-        "is_settled": False,
+        "platform_fee_coins": platform_fee,
+        "mentor_earning_coins": mentor_earning,
+        "is_settled": settle_immediately,
     }
+    if settle_immediately:
+        scp["settled_at"] = datetime.now().isoformat()
     result = supabase.table("session_coin_payments").insert(scp).execute()
+    
+    # Credit mentor immediately when settle_immediately
+    if settle_immediately and mentor_earning > 0:
+        mentor_wallet = get_or_create_wallet(mentor_id, "mentorship")
+        mentor_balance = float(mentor_wallet["balance"])
+        new_mentor_balance = mentor_balance + mentor_earning
+        supabase.table("wallets").update({
+            "balance": new_mentor_balance,
+            "total_credited": float(mentor_wallet["total_credited"]) + mentor_earning,
+        }).eq("id", mentor_wallet["id"]).execute()
+        supabase.table("wallet_transactions").insert({
+            "wallet_id": mentor_wallet["id"],
+            "tx_type": "credit",
+            "category": "session_earning",
+            "amount": mentor_earning,
+            "balance_after": new_mentor_balance,
+            "session_id": session_id,
+            "related_user_id": mentee_id,
+            "description": f"Session earning: {mentor_earning} coins (Avittam Coins payment)",
+        }).execute()
+        logger.info(f"Credited mentor {mentor_id} {mentor_earning} coins for session {session_id}")
     
     logger.info(
         f"Student {mentee_id} paid {total_coins} coins for session {session_id}"
@@ -399,7 +477,8 @@ def pay_for_session_with_coins(
         "session_coin_payment_id": result.data[0]["id"],
         "total_coins_paid": total_coins,
         "new_balance": new_balance,
-        "message": "Payment successful. Mentor will receive earnings after session rating.",
+        "mentor_earning": mentor_earning if settle_immediately else None,
+        "message": "Payment successful. Mentor credited." if settle_immediately else "Payment successful. Mentor will receive earnings after session rating.",
     }
 
 

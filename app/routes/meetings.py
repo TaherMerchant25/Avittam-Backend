@@ -52,7 +52,7 @@ async def handle_google_callback(
     """Handle Google OAuth callback"""
     if error:
         return RedirectResponse(
-            url=f"{settings.frontend_url}/settings?google_error={error}"
+            url=f"{settings.frontend_url}/?google_error={error}"
         )
     
     if not code:
@@ -79,9 +79,9 @@ async def handle_google_callback(
     # Store tokens in database
     await store_user_google_tokens(user_id, tokens)
     
-    # Redirect to frontend
+    # Redirect to frontend dashboard with success flag
     return RedirectResponse(
-        url=f"{settings.frontend_url}/settings?google_connected=true"
+        url=f"{settings.frontend_url}/?google_connected=true"
     )
 
 
