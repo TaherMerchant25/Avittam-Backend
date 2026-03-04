@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     # Razorpay Configuration
     razorpay_key_id: Optional[str] = Field(default=None, alias="RAZORPAY_KEY_ID")
     razorpay_key_secret: Optional[str] = Field(default=None, alias="RAZORPAY_KEY_SECRET")
+    razorpay_webhook_secret: Optional[str] = Field(default=None, alias="RAZORPAY_WEBHOOK_SECRET")
 
     # Stream Chat Configuration
     stream_chat_api_key: Optional[str] = Field(default=None, alias="STREAM_CHAT_API_KEY")

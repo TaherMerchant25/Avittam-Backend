@@ -3,7 +3,10 @@
 # HTTP endpoints for wallet, coins, NPS, referral fees
 # =====================================================
 
-from fastapi import APIRouter, Depends, Query
+import hashlib
+import hmac as hmac_module
+import json
+from fastapi import APIRouter, Depends, Query, Request
 from loguru import logger
 from typing import Optional
 
@@ -162,6 +165,103 @@ async def verify_coin_load_redirect(
     except Exception as e:
         logger.error(f"Redirect verify failed: {e}")
         return RedirectResponse(url=f"{frontend_url}?payment=failed&reason=verification_error")
+
+
+@router.post("/coins/webhook")
+async def razorpay_coin_webhook(request: Request):
+    """
+    Razorpay webhook endpoint — receives payment.captured events.
+    This is the RELIABLE way to credit coins: Razorpay's servers call this
+    directly, regardless of whether the user's browser is open.
+    Configure in Razorpay Dashboard → Settings → Webhooks.
+    """
+    from app.config.database import get_supabase_admin
+    from app.config.settings import settings
+
+    body = await request.body()
+    signature = request.headers.get("X-Razorpay-Signature", "")
+
+    # Verify webhook signature if secret is configured
+    if settings.razorpay_webhook_secret:
+        expected = hmac_module.new(
+            settings.razorpay_webhook_secret.encode(),
+            body,
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac_module.compare_digest(expected, signature):
+            logger.warning("Razorpay webhook: invalid signature — ignoring")
+            return {"status": "ok"}  # Return 200 so Razorpay doesn't retry endlessly
+    else:
+        logger.warning("Razorpay webhook: RAZORPAY_WEBHOOK_SECRET not set — skipping signature check")
+
+    try:
+        payload = json.loads(body)
+    except Exception:
+        return {"status": "ok"}
+
+    event = payload.get("event", "")
+    logger.info(f"Razorpay webhook received: {event}")
+
+    if event == "payment.captured":
+        payment = payload.get("payload", {}).get("payment", {}).get("entity", {})
+        razorpay_order_id = payment.get("order_id")
+        razorpay_payment_id = payment.get("id")
+
+        if not razorpay_order_id:
+            return {"status": "ok"}
+
+        try:
+            supabase = get_supabase_admin()
+
+            # Find the order
+            order_result = supabase.table("coin_load_orders").select("*").eq(
+                "razorpay_order_id", razorpay_order_id
+            ).single().execute()
+
+            if not order_result.data:
+                logger.info(f"Webhook: no coin order for razorpay_order_id={razorpay_order_id}, skipping")
+                return {"status": "ok"}
+
+            order = order_result.data
+
+            if order["status"] == "paid":
+                logger.info(f"Webhook: order {order['id']} already paid, skipping")
+                return {"status": "ok"}
+
+            coins = float(order["coins_credited"])
+            wallet_id = order["wallet_id"]
+
+            # Mark order paid
+            supabase.table("coin_load_orders").update({
+                "razorpay_payment_id": razorpay_payment_id,
+                "status": "paid",
+            }).eq("id", order["id"]).execute()
+
+            # Credit wallet
+            wallet = supabase.table("wallets").select("*").eq("id", wallet_id).single().execute()
+            current_balance = float(wallet.data["balance"])
+            new_balance = current_balance + coins
+
+            supabase.table("wallets").update({
+                "balance": new_balance,
+                "total_credited": float(wallet.data["total_credited"]) + coins,
+            }).eq("id", wallet_id).execute()
+
+            supabase.table("wallet_transactions").insert({
+                "wallet_id": wallet_id,
+                "tx_type": "credit",
+                "category": "coin_load",
+                "amount": coins,
+                "balance_after": new_balance,
+                "description": f"Loaded {coins:.0f} Avittam Coins (webhook)",
+            }).execute()
+
+            logger.info(f"Webhook: credited {coins:.0f} coins to wallet {wallet_id} for order {order['id']}")
+
+        except Exception as e:
+            logger.error(f"Webhook coin credit failed: {e}")
+
+    return {"status": "ok"}
 
 
 # =====================================================
