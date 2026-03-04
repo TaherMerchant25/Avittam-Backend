@@ -85,6 +85,74 @@ async def get_session_chat_status(session_id: str, user: User = Depends(get_curr
 
 
 # =====================================================
+# POST /api/chat/session/{session_id}/create-channel
+# =====================================================
+@router.post("/session/{session_id}/create-channel")
+async def create_session_chat_channel(session_id: str, user: User = Depends(get_current_user)):
+    """
+    Create or restore a chat channel for a booked session.
+    Called when a session exists in My Sessions but the chat channel creation
+    failed silently during booking. No re-payment required — the session being
+    in 'scheduled'/'ongoing' state implies payment was already made.
+    """
+    supabase = get_supabase_admin()
+
+    # Verify session exists and user is a participant
+    session_result = supabase.table("sessions").select("*").eq("id", session_id).execute()
+    if not session_result.data:
+        raise NotFoundError("Session not found")
+    session = session_result.data[0]
+
+    if session["mentor_id"] != user.id and session["mentee_id"] != user.id:
+        raise BadRequestError("Not a participant of this session")
+
+    # If channel already exists just return it (activate if inactive)
+    existing = supabase.table("chat_channels").select("*").eq("session_id", session_id).execute()
+    if existing.data:
+        channel = existing.data[0]
+        if not channel.get("is_active"):
+            supabase.table("chat_channels").update({"is_active": True}).eq("id", channel["id"]).execute()
+            channel["is_active"] = True
+            try:
+                from app.services import stream_chat as scs
+                if scs.is_stream_chat_configured():
+                    scs.activate_channel(channel["stream_channel_id"])
+            except Exception as act_err:
+                logger.warning(f"Could not activate stream channel: {act_err}")
+        return {"success": True, "chatChannel": channel, "isActive": True}
+
+    # Create a fresh channel via the booking service
+    mentor_id = session["mentor_id"]
+    mentee_id = session["mentee_id"]
+
+    mentor_result = supabase.table("users").select("name, avatar_url").eq("id", mentor_id).single().execute()
+    mentee_result = supabase.table("users").select("name, avatar_url").eq("id", mentee_id).single().execute()
+    mentor_data = mentor_result.data or {}
+    mentee_data = mentee_result.data or {}
+
+    from app.services import session_booking as booking_svc
+    stream_channel_id = booking_svc.create_chat_channel_for_session(
+        session_id=session_id,
+        mentor_id=mentor_id,
+        mentee_id=mentee_id,
+        payment_id=None,
+        mentor_name=mentor_data.get("name", "Mentor"),
+        mentee_name=mentee_data.get("name", "Student"),
+        mentor_avatar=mentor_data.get("avatar_url"),
+        mentee_avatar=mentee_data.get("avatar_url"),
+    )
+
+    channel_result = supabase.table("chat_channels").select("*").eq("session_id", session_id).execute()
+    channel = channel_result.data[0] if channel_result.data else {
+        "session_id": session_id,
+        "stream_channel_id": stream_channel_id,
+        "is_active": True,
+    }
+
+    return {"success": True, "chatChannel": channel, "isActive": True}
+
+
+# =====================================================
 # POST /api/chat/channels/{session_id}/pay
 # =====================================================
 class ChatPayResponse(BaseModel):
