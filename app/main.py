@@ -5,7 +5,9 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -15,6 +17,17 @@ import sys
 from app.config.settings import settings
 from app.routes import sessions, mentors, meetings, notifications, payments, wallets, calcom, admin, chat
 from app.middleware.error_handler import app_exception_handler, AppError
+
+# Known allowed origins (never rely solely on env var for CORS)
+_ALLOWED_ORIGINS = {
+    "https://avittam.vercel.app",
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+}
+# Also add whatever FRONTEND_URL is set to (strip trailing slash)
+_ALLOWED_ORIGINS.add(settings.frontend_url.rstrip("/"))
 
 
 # Configure logging
@@ -71,27 +84,61 @@ app.add_exception_handler(AppError, app_exception_handler)
 # MIDDLEWARE
 # =====================================================
 
-# CORS configuration
-# Strip trailing slash from frontend_url so it matches the Origin header browsers send
-_frontend = settings.frontend_url.rstrip("/")
-allowed_origins = [
-    _frontend,
-    f"{_frontend}/",          # also allow with trailing slash just in case
-    "https://avittam.vercel.app",
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:5173",
-]
+def _cors_headers(origin: str) -> dict:
+    """Return CORS headers for a known origin."""
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
+        "Access-Control-Max-Age": "3600",
+    }
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
-    expose_headers=["Content-Length"],
-)
+
+# Custom CORS middleware — handles ALL responses including error ones
+@app.middleware("http")
+async def cors_middleware(request: Request, call_next):
+    origin = request.headers.get("origin", "")
+
+    # Handle preflight immediately
+    if request.method == "OPTIONS":
+        resp = Response(status_code=200)
+        if origin in _ALLOWED_ORIGINS:
+            for k, v in _cors_headers(origin).items():
+                resp.headers[k] = v
+        return resp
+
+    response = await call_next(request)
+
+    # Inject CORS headers into every response from an allowed origin
+    if origin in _ALLOWED_ORIGINS:
+        for k, v in _cors_headers(origin).items():
+            response.headers[k] = v
+
+    return response
+
+
+# Also handle FastAPI/Starlette built-in HTTP exceptions (403, 422, etc.)
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    origin = request.headers.get("origin", "")
+    headers = _cors_headers(origin) if origin in _ALLOWED_ORIGINS else {}
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"success": False, "error": str(exc.detail)},
+        headers=headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    origin = request.headers.get("origin", "")
+    headers = _cors_headers(origin) if origin in _ALLOWED_ORIGINS else {}
+    return JSONResponse(
+        status_code=422,
+        content={"success": False, "error": "Validation error", "details": exc.errors()},
+        headers=headers,
+    )
 
 
 # Request logging middleware
