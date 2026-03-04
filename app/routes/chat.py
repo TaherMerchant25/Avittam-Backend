@@ -59,50 +59,28 @@ async def get_channels(user: User = Depends(get_current_user)):
 # =====================================================
 @router.get("/session/{session_id}")
 async def get_session_chat_status(session_id: str, user: User = Depends(get_current_user)):
-    """Get chat status for a session. Auto-creates chat channel if session exists but no channel."""
+    """
+    Get chat status for a session.
+    Returns the existing channel if it exists and is_active.
+    Does NOT auto-create — chat is only created after student pays via /book/coins.
+    """
     supabase = get_supabase_admin()
     result = supabase.table("chat_channels").select("*").eq("session_id", session_id).execute()
     channel = result.data[0] if result.data else None
 
-    # Auto-create chat for scheduled sessions that don't have a channel yet (e.g. from Cal.com, accept flow)
+    # Only return channel if it was explicitly created (payment confirmed)
+    # Never auto-create here — that bypasses the coin payment gate.
     if not channel:
-        if not stream_chat_service.is_stream_chat_configured():
-            from loguru import logger
-            logger.warning("[Chat] Stream Chat not configured. Add STREAM_CHAT_API_KEY and STREAM_CHAT_API_SECRET to .env. See CHAT_SETUP.md")
-        else:
-            session_result = supabase.table("sessions").select("id, mentor_id, mentee_id").eq(
-                "id", session_id
-            ).single().execute()
-            if session_result.data:
-                sess = session_result.data
-                if sess["mentor_id"] == user.id or sess["mentee_id"] == user.id:
-                    mentor_id, mentee_id = sess["mentor_id"], sess["mentee_id"]
-                    mentor_r = supabase.table("users").select("name, avatar_url").eq("id", mentor_id).single().execute()
-                    mentee_r = supabase.table("users").select("name, avatar_url").eq("id", mentee_id).single().execute()
-                    mentor_data = mentor_r.data or {}
-                    mentee_data = mentee_r.data or {}
-                    try:
-                        from app.services import session_booking as booking_service
-                        stream_channel_id = booking_service.create_chat_channel_for_session(
-                            session_id, mentor_id, mentee_id, None,
-                            mentor_data.get("name", "Mentor"), mentee_data.get("name", "Student"),
-                            mentor_data.get("avatar_url"), mentee_data.get("avatar_url"),
-                            "Mentorship Session Chat",
-                        )
-                        channel = {
-                            "session_id": session_id,
-                            "mentor_id": mentor_id,
-                            "mentee_id": mentee_id,
-                            "stream_channel_id": stream_channel_id,
-                            "is_active": True,
-                        }
-                    except Exception:
-                        pass
+        return {
+            "success": True,
+            "chatChannel": None,
+            "isActive": False,
+        }
 
     return {
         "success": True,
         "chatChannel": channel,
-        "isActive": channel.get("is_active", False) if channel else False,
+        "isActive": channel.get("is_active", False),
     }
 
 
