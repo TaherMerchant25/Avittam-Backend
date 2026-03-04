@@ -4,6 +4,7 @@
 # =====================================================
 
 from fastapi import APIRouter, Depends, Query
+from loguru import logger
 from typing import Optional
 
 from app.middleware.auth import get_current_user
@@ -118,6 +119,49 @@ async def verify_coin_load_payment(
         "data": result,
         "message": f"Successfully loaded {result['coins_credited']} Avittam Coins!",
     }
+
+
+@router.get("/coins/verify-redirect")
+async def verify_coin_load_redirect(
+    order_id: str,
+    razorpay_order_id: str,
+    razorpay_payment_id: str,
+    razorpay_signature: str,
+    frontend_url: str = "https://avittam.vercel.app",
+):
+    """
+    Handle Razorpay redirect-based payments (NetBanking, some UPI apps).
+    Razorpay POSTs/GETs here after redirect; we verify and redirect back to the frontend.
+    """
+    from fastapi.responses import RedirectResponse
+    from app.config.database import get_supabase_admin
+
+    try:
+        # Find which user owns this order
+        supabase = get_supabase_admin()
+        order_result = supabase.table("coin_load_orders").select("user_id, coins_credited").eq(
+            "razorpay_order_id", razorpay_order_id
+        ).single().execute()
+
+        if not order_result.data:
+            return RedirectResponse(url=f"{frontend_url}?payment=failed&reason=order_not_found")
+
+        user_id = order_result.data["user_id"]
+
+        result = verify_coin_load(
+            user_id=user_id,
+            order_id=order_id,
+            razorpay_order_id=razorpay_order_id,
+            razorpay_payment_id=razorpay_payment_id,
+            razorpay_signature=razorpay_signature,
+        )
+        coins = result.get("coins_credited", 0)
+        return RedirectResponse(
+            url=f"{frontend_url}?payment=success&coins={coins}&payment_id={razorpay_payment_id}"
+        )
+    except Exception as e:
+        logger.error(f"Redirect verify failed: {e}")
+        return RedirectResponse(url=f"{frontend_url}?payment=failed&reason=verification_error")
 
 
 # =====================================================
