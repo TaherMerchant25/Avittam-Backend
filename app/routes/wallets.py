@@ -308,27 +308,46 @@ async def check_coin_payment_status(
                 f"https://api.razorpay.com/v1/orders/{razorpay_order_id}/payments",
                 auth=(settings.razorpay_key_id, settings.razorpay_key_secret),
             )
+        logger.info(f"check-payment: Razorpay status={resp.status_code} body={resp.text[:500]}")
         if resp.status_code != 200:
-            logger.warning(f"check-payment: Razorpay API returned {resp.status_code}")
+            logger.warning(f"check-payment: Razorpay API returned {resp.status_code}: {resp.text}")
             return {"success": False, "data": {"status": "pending"}, "message": "Waiting for payment"}
 
         data = resp.json()
         payments = data.get("items", [])
+        statuses = [p.get("status") for p in payments]
+        logger.info(f"check-payment: order={razorpay_order_id} payment_count={len(payments)} statuses={statuses}")
     except Exception as e:
         logger.error(f"check-payment: Razorpay API call failed: {e}")
         return {"success": False, "data": {"status": "pending"}, "message": "Waiting for payment"}
 
-    # Find a captured payment
-    captured = next((p for p in payments if p.get("status") == "captured"), None)
-    if not captured:
-        # Check for failed/expired
-        failed = next((p for p in payments if p.get("status") in ("failed",)), None)
+    # UPI QR / live mode: payments go through "authorized" first, then "captured".
+    # We treat both as a successful payment and credit coins immediately.
+    successful = next(
+        (p for p in payments if p.get("status") in ("captured", "authorized")), None
+    )
+    if not successful:
+        failed = next((p for p in payments if p.get("status") == "failed"), None)
         if failed:
             return {"success": False, "data": {"status": "failed"}, "message": "Payment failed"}
         return {"success": False, "data": {"status": "pending"}, "message": "Waiting for payment confirmation"}
 
+    # If payment is only authorized (not yet captured), try to capture it
+    razorpay_payment_id = successful["id"]
+    if successful.get("status") == "authorized":
+        logger.info(f"check-payment: payment {razorpay_payment_id} is authorized — capturing")
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                cap_resp = await client.post(
+                    f"https://api.razorpay.com/v1/payments/{razorpay_payment_id}/capture",
+                    auth=(settings.razorpay_key_id, settings.razorpay_key_secret),
+                    json={"amount": successful.get("amount", 0), "currency": "INR"},
+                )
+            logger.info(f"check-payment: capture response {cap_resp.status_code}: {cap_resp.text[:200]}")
+        except Exception as e:
+            logger.warning(f"check-payment: capture call failed (may auto-capture): {e}")
+
     # Payment captured — credit coins (idempotent)
-    razorpay_payment_id = captured["id"]
     coins = float(order["coins_credited"])
     wallet_id = order["wallet_id"]
 
