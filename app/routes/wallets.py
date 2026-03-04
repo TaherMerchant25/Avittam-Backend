@@ -264,6 +264,107 @@ async def razorpay_coin_webhook(request: Request):
     return {"status": "ok"}
 
 
+@router.get("/coins/check-payment", response_model=ApiResponse)
+async def check_coin_payment_status(
+    razorpay_order_id: str,
+    user: User = Depends(get_current_user),
+):
+    """
+    Poll Razorpay's API directly to check if an order has been paid.
+    Credits coins if payment is captured but not yet credited.
+    Called by the frontend every few seconds while waiting for UPI/QR confirmation.
+    """
+    import httpx
+    from app.config.database import get_supabase_admin
+    from app.config.settings import settings
+
+    if not settings.razorpay_key_id or not settings.razorpay_key_secret:
+        return {"success": False, "data": {"status": "unknown"}, "message": "Payment gateway not configured"}
+
+    supabase = get_supabase_admin()
+
+    # Look up our order record
+    order_result = supabase.table("coin_load_orders").select("*").eq(
+        "razorpay_order_id", razorpay_order_id
+    ).eq("user_id", user.id).single().execute()
+
+    if not order_result.data:
+        return {"success": False, "data": {"status": "not_found"}, "message": "Order not found"}
+
+    order = order_result.data
+
+    # Already credited — just return success
+    if order["status"] == "paid":
+        return {
+            "success": True,
+            "data": {"status": "paid", "coins_credited": order["coins_credited"]},
+            "message": f"Payment already processed — {order['coins_credited']:.0f} coins credited",
+        }
+
+    # Ask Razorpay for the list of payments on this order
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"https://api.razorpay.com/v1/orders/{razorpay_order_id}/payments",
+                auth=(settings.razorpay_key_id, settings.razorpay_key_secret),
+            )
+        if resp.status_code != 200:
+            logger.warning(f"check-payment: Razorpay API returned {resp.status_code}")
+            return {"success": False, "data": {"status": "pending"}, "message": "Waiting for payment"}
+
+        data = resp.json()
+        payments = data.get("items", [])
+    except Exception as e:
+        logger.error(f"check-payment: Razorpay API call failed: {e}")
+        return {"success": False, "data": {"status": "pending"}, "message": "Waiting for payment"}
+
+    # Find a captured payment
+    captured = next((p for p in payments if p.get("status") == "captured"), None)
+    if not captured:
+        # Check for failed/expired
+        failed = next((p for p in payments if p.get("status") in ("failed",)), None)
+        if failed:
+            return {"success": False, "data": {"status": "failed"}, "message": "Payment failed"}
+        return {"success": False, "data": {"status": "pending"}, "message": "Waiting for payment confirmation"}
+
+    # Payment captured — credit coins (idempotent)
+    razorpay_payment_id = captured["id"]
+    coins = float(order["coins_credited"])
+    wallet_id = order["wallet_id"]
+
+    # Mark order paid
+    supabase.table("coin_load_orders").update({
+        "razorpay_payment_id": razorpay_payment_id,
+        "status": "paid",
+    }).eq("id", order["id"]).execute()
+
+    # Credit wallet
+    wallet = supabase.table("wallets").select("*").eq("id", wallet_id).single().execute()
+    current_balance = float(wallet.data["balance"])
+    new_balance = current_balance + coins
+
+    supabase.table("wallets").update({
+        "balance": new_balance,
+        "total_credited": float(wallet.data["total_credited"]) + coins,
+    }).eq("id", wallet_id).execute()
+
+    supabase.table("wallet_transactions").insert({
+        "wallet_id": wallet_id,
+        "tx_type": "credit",
+        "category": "coin_load",
+        "amount": coins,
+        "balance_after": new_balance,
+        "description": f"Loaded {coins:.0f} Avittam Coins (₹{order['amount_inr']})",
+    }).execute()
+
+    logger.info(f"check-payment: credited {coins:.0f} coins via status poll for order {order['id']}")
+    return {
+        "success": True,
+        "data": {"status": "paid", "coins_credited": coins, "new_balance": new_balance},
+        "message": f"✅ Payment confirmed! {coins:.0f} Avittam Coins added.",
+    }
+
+
 # =====================================================
 # SESSION PAYMENT WITH COINS
 # =====================================================
