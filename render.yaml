@@ -56,4 +56,4 @@ services:
     plan: free
     schedule: "*/10 * * * *"
     buildCommand: "echo 'keepalive build'"
-    startCommand: "curl -s https://avittam-backend.onrender.com/api/health && echo 'Backend is alive'"
+    startCommand: "curl -s https://avittam-backend-yr1z.onrender.com/api/health && echo 'Backend is alive'"
