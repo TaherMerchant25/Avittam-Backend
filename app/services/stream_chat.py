@@ -2,6 +2,8 @@
 # STREAM CHAT SERVICE - Server-side Stream Chat Admin
 # =====================================================
 
+import hmac
+import hashlib
 from typing import Optional
 from loguru import logger
 
@@ -96,3 +98,37 @@ def ensure_system_user() -> None:
         client.upsert_user({"id": "system", "name": "MentorGold", "role": "admin"})
     except Exception as e:
         logger.warning(f"[StreamChat] Could not create system user: {e}")
+
+
+def ensure_bot_user() -> None:
+    """Ensure the Avittam Bot user exists in Stream Chat"""
+    try:
+        client = _get_stream_client()
+        client.upsert_user({
+            "id": "avittam-bot",
+            "name": "Avittam Bot 🤖",
+            "role": "admin",
+        })
+        logger.info("[StreamChat] Bot user 'avittam-bot' ensured")
+    except Exception as e:
+        logger.warning(f"[StreamChat] Could not create bot user: {e}")
+
+
+def send_bot_message(channel_type: str, channel_id: str, text: str) -> None:
+    """Send a message as Avittam Bot to a channel"""
+    client = _get_stream_client()
+    channel = client.channel(channel_type, channel_id)
+    channel.send_message({"text": text}, "avittam-bot")
+    logger.info(f"[StreamChat] Bot sent message to {channel_type}:{channel_id}")
+
+
+def verify_webhook_signature(body: bytes, signature: str) -> bool:
+    """Verify Stream Chat webhook HMAC-SHA256 signature"""
+    if not settings.stream_chat_api_secret or not signature:
+        return False
+    expected = hmac.new(
+        settings.stream_chat_api_secret.encode(),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)

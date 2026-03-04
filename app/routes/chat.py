@@ -4,7 +4,8 @@
 
 import hmac
 import hashlib
-from fastapi import APIRouter, Depends
+import json
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from typing import Optional, List, Any
 
@@ -14,6 +15,7 @@ from app.config.settings import settings
 from app.models.schemas import User
 from app.services import stream_chat as stream_chat_service
 from app.middleware.error_handler import BadRequestError, NotFoundError
+from loguru import logger
 
 
 router = APIRouter()
@@ -176,6 +178,91 @@ async def create_chat_payment_order(session_id: str, user: User = Depends(get_cu
         "paymentId": payment["id"],
         "keyId": settings.razorpay_key_id,
     }
+
+
+# =====================================================
+# POST /api/chat/webhook  (called by Stream Chat servers)
+# =====================================================
+
+@router.post("/webhook")
+async def stream_chat_webhook(request: Request):
+    """
+    Stream Chat webhook — listens for message.new events and responds to bot commands.
+
+    Commands:
+      /meet  — Generates a Jitsi Meet link for the session
+      /help  — Lists available commands
+    """
+    body = await request.body()
+    signature = request.headers.get("X-Signature", "")
+
+    # Verify signature (warn only — lets local dev work without the secret)
+    if signature and not stream_chat_service.verify_webhook_signature(body, signature):
+        logger.warning("[ChatWebhook] X-Signature mismatch — check STREAM_CHAT_API_SECRET")
+
+    try:
+        event = json.loads(body)
+    except Exception:
+        return {"success": False, "error": "Invalid JSON body"}
+
+    # Only handle new messages
+    if event.get("type") != "message.new":
+        return {"success": True}
+
+    message = event.get("message", {})
+    text = (message.get("text") or "").strip()
+    sender_id = (message.get("user") or {}).get("id", "")
+    channel_id = event.get("channel_id", "")
+    channel_type = event.get("channel_type", "messaging")
+
+    # Never reply to ourselves (infinite-loop guard)
+    if sender_id == "avittam-bot":
+        return {"success": True}
+
+    if not text.startswith("/"):
+        return {"success": True}
+
+    cmd = text.lower().split()[0]
+
+    try:
+        if cmd == "/meet":
+            # Deterministic Jitsi room from channel_id (no API key needed)
+            room_hash = hashlib.sha256(channel_id.encode()).hexdigest()[:12]
+            meet_url = f"https://meet.jit.si/avittam-{room_hash}"
+
+            # Persist link in sessions.google_meet_link if possible
+            try:
+                session_id = channel_id.removeprefix("session-")
+                supabase = get_supabase_admin()
+                supabase.table("sessions").update(
+                    {"google_meet_link": meet_url}
+                ).eq("id", session_id).execute()
+            except Exception as db_err:
+                logger.warning(f"[ChatWebhook] Could not persist meet link: {db_err}")
+
+            response_text = (
+                f"🎥 **Your meeting link is ready!**\n\n"
+                f"🔗 {meet_url}\n\n"
+                f"_Powered by Jitsi Meet — no sign-in required. "
+                f"Share this link with your session partner._"
+            )
+            stream_chat_service.ensure_bot_user()
+            stream_chat_service.send_bot_message(channel_type, channel_id, response_text)
+            logger.info(f"[ChatWebhook] /meet handled for channel {channel_id}")
+
+        elif cmd == "/help":
+            help_text = (
+                "🤖 **Avittam Bot Commands**\n\n"
+                "• `/meet` — Generate a Jitsi video meeting link for this session\n"
+                "• `/help` — Show this help message"
+            )
+            stream_chat_service.ensure_bot_user()
+            stream_chat_service.send_bot_message(channel_type, channel_id, help_text)
+
+    except Exception as e:
+        logger.error(f"[ChatWebhook] Error handling command '{cmd}': {e}")
+
+    return {"success": True}
 
 
 def create_razorpay_order(amount: int, receipt: str, notes: dict):

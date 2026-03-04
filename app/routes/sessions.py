@@ -49,6 +49,7 @@ class BookWithCoinsBody(BaseModel):
     totalCoins: float
     scheduledAt: Optional[str] = None
     durationMinutes: Optional[int] = None
+    requestId: Optional[str] = None  # mentor_request row id — marked 'booked' after payment
 
 
 @router.post("/book/coins")
@@ -82,6 +83,17 @@ async def book_session_with_coins(body: BookWithCoinsBody, user: User = Depends(
         total_coins=body.totalCoins,
         settle_immediately=True,
     )
+
+    # Mark the originating mentor_request as 'booked' so it never resurfaces for the student
+    if body.requestId:
+        try:
+            supabase.table("mentor_requests").update({
+                "status": "booked",
+                "updated_at": datetime.utcnow().isoformat(),
+            }).eq("id", body.requestId).execute()
+        except Exception as _req_err:
+            from loguru import logger as _log
+            _log.warning(f"Could not mark request {body.requestId} as booked: {_req_err}")
 
     stream_channel_id = None
     try:

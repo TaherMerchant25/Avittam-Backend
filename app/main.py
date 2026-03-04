@@ -13,7 +13,7 @@ from loguru import logger
 import sys
 
 from app.config.settings import settings
-from app.routes import sessions, mentors, meetings, notifications, payments, wallets, calcom, chat
+from app.routes import sessions, mentors, meetings, notifications, payments, wallets, calcom, admin, chat
 from app.middleware.error_handler import app_exception_handler, AppError
 
 
@@ -34,14 +34,17 @@ limiter = Limiter(key_func=get_remote_address)
 async def lifespan(app: FastAPI):
     """Application lifespan events"""
     logger.info("🚀 Starting MentorGold API Server...")
-    jwt_secret = settings.supabase_jwt_secret
-    if not jwt_secret or not jwt_secret.strip():
-        logger.warning(
-            "⚠️  SUPABASE_JWT_SECRET not set. Auth may fail with 401. "
-            "See python-backend/AUTH_SETUP.md to fix."
-        )
-    else:
-        logger.info("✓ SUPABASE_JWT_SECRET loaded for auth")
+    # Setup Stream Chat bot user on startup
+    try:
+        from app.services import stream_chat as sc
+        if sc.is_stream_chat_configured():
+            sc.ensure_system_user()
+            sc.ensure_bot_user()
+            logger.info("🤖 Stream Chat bot user initialized")
+        else:
+            logger.warning("⚠️  Stream Chat not configured — add STREAM_CHAT_API_KEY & STREAM_CHAT_API_SECRET to .env")
+    except Exception as e:
+        logger.warning(f"⚠️  Stream Chat startup init failed: {e}")
     yield
     logger.info("👋 Shutting down MentorGold API Server...")
 
@@ -69,8 +72,12 @@ app.add_exception_handler(AppError, app_exception_handler)
 # =====================================================
 
 # CORS configuration
+# Strip trailing slash from frontend_url so it matches the Origin header browsers send
+_frontend = settings.frontend_url.rstrip("/")
 allowed_origins = [
-    settings.frontend_url,
+    _frontend,
+    f"{_frontend}/",          # also allow with trailing slash just in case
+    "https://avittam.vercel.app",
     "http://localhost:3000",
     "http://localhost:5173",
     "http://127.0.0.1:3000",
@@ -82,7 +89,8 @@ app.add_middleware(
     allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+    expose_headers=["Content-Length"],
 )
 
 
@@ -129,6 +137,7 @@ app.include_router(notifications.router, prefix="/api/notifications", tags=["Not
 app.include_router(payments.router, prefix="/api/payments", tags=["Payments"])
 app.include_router(wallets.router, prefix="/api/wallets", tags=["Wallets"])
 app.include_router(calcom.router, prefix="/api/calcom", tags=["Cal.com"])
+app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
 app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
 
 

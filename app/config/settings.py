@@ -3,18 +3,10 @@
 # Environment configuration with Pydantic Settings
 # =====================================================
 
-from pathlib import Path
 from pydantic_settings import BaseSettings
 from pydantic import Field
 from functools import lru_cache
 from typing import Optional
-
-# Resolve .env path: settings.py is in app/config/, .env is in python-backend/
-_ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
-# Pre-load .env into os.environ so Pydantic picks it up (handles cwd-independent loading)
-if _ENV_PATH.exists():
-    from dotenv import load_dotenv
-    load_dotenv(_ENV_PATH, override=False)
 
 
 class Settings(BaseSettings):
@@ -43,7 +35,7 @@ class Settings(BaseSettings):
     google_client_id: Optional[str] = Field(default=None, alias="GOOGLE_CLIENT_ID")
     google_client_secret: Optional[str] = Field(default=None, alias="GOOGLE_CLIENT_SECRET")
     google_redirect_uri: str = Field(
-        default="http://localhost:8000/api/meetings/google/callback",
+        default="http://localhost:3001/api/auth/google/callback",
         alias="GOOGLE_REDIRECT_URI"
     )
     
@@ -54,12 +46,12 @@ class Settings(BaseSettings):
     razorpay_key_id: Optional[str] = Field(default=None, alias="RAZORPAY_KEY_ID")
     razorpay_key_secret: Optional[str] = Field(default=None, alias="RAZORPAY_KEY_SECRET")
 
-    # Stream Chat
+    # Stream Chat Configuration
     stream_chat_api_key: Optional[str] = Field(default=None, alias="STREAM_CHAT_API_KEY")
     stream_chat_api_secret: Optional[str] = Field(default=None, alias="STREAM_CHAT_API_SECRET")
-    
+
     class Config:
-        env_file = str(_ENV_PATH)
+        env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = False
         extra = "ignore"

@@ -8,6 +8,7 @@ python-multipart==0.0.6
 
 # Database & Auth
 supabase==2.11.0
+stream-chat==4.30.1
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 razorpay==1.4.2
@@ -32,9 +33,6 @@ slowapi==0.1.9
 
 # Logging
 loguru==0.7.2
-
-# Stream Chat
-stream-chat>=4.24.0
 
 # Development
 pytest==7.4.4

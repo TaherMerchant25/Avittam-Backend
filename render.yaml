@@ -41,3 +41,19 @@ services:
         sync: false
       - key: RAZORPAY_KEY_SECRET
         sync: false
+      - key: STREAM_CHAT_API_KEY
+        sync: false
+      - key: STREAM_CHAT_API_SECRET
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+
+  # Keep-alive cron job — pings the backend every 10 minutes to prevent free-tier sleep
+  - type: cron
+    name: avittam-keepalive
+    env: python
+    region: singapore
+    plan: free
+    schedule: "*/10 * * * *"
+    buildCommand: "echo 'keepalive build'"
+    startCommand: "curl -s https://avittam-backend.onrender.com/api/health && echo 'Backend is alive'"

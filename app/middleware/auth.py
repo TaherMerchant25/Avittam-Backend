@@ -13,6 +13,7 @@ import httpx
 from functools import lru_cache
 
 from app.config.settings import settings
+from app.config.database import get_supabase_admin
 from app.models.schemas import User, UserRole
 from app.middleware.error_handler import UnauthorizedError
 
@@ -85,37 +86,6 @@ async def verify_token(token: str) -> Optional[dict]:
         except JWTError as e:
             logger.debug(f"Supabase HS256 token verification failed: {e}")
     
-    # Fallback: validate via Supabase Auth API (no JWT secret needed)
-    # Try with anon key first, then service_role (some projects require service_role for server-side)
-    for apikey in [settings.supabase_anon_key, settings.supabase_service_role_key or ""]:
-        if not apikey:
-            continue
-        try:
-            url = f"{settings.supabase_url.rstrip('/')}/auth/v1/user"
-            response = httpx.get(
-                url,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "apikey": apikey,
-                    "Content-Type": "application/json",
-                },
-                timeout=10.0,
-            )
-            if response.status_code == 200:
-                data = response.json()
-                user_id = None
-                user_email = None
-                if isinstance(data, dict):
-                    user_id = data.get("id") or (data.get("user") or {}).get("id") or data.get("sub")
-                    user_email = data.get("email") or (data.get("user") or {}).get("email")
-                if user_id:
-                    logger.info(f"Supabase API token verified for user: {user_id}")
-                    return {"sub": user_id, "email": user_email}
-            else:
-                logger.warning(f"Supabase API auth failed: {response.status_code} - {response.text[:400]}")
-        except Exception as e:
-            logger.debug(f"Supabase API attempt failed: {e}")
-
     # Last fallback: verify as custom JWT
     try:
         payload = jwt.decode(
@@ -151,31 +121,19 @@ async def get_current_user(
         
         user_id = payload["sub"]
         
-        # Fetch user from database via Supabase REST API (avoids supabase-py Client proxy issue)
-        url = f"{settings.supabase_url.rstrip('/')}/rest/v1/users"
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                url,
-                params={"id": f"eq.{user_id}", "select": "*"},
-                headers={
-                    "apikey": settings.supabase_service_role_key or settings.supabase_anon_key,
-                    "Authorization": f"Bearer {settings.supabase_service_role_key or settings.supabase_anon_key}",
-                    "Accept": "application/json",
-                },
-                timeout=10.0,
-            )
-        if response.status_code != 200:
-            logger.warning(f"Supabase REST users fetch failed: {response.status_code} - {response.text[:200]}")
-            raise UnauthorizedError("User not found")
-        data = response.json()
-        user_data = data[0] if isinstance(data, list) and data else None
-        if not user_data:
+        # Fetch user from database
+        supabase = get_supabase_admin()
+        result = supabase.table("users").select("*").eq("id", user_id).single().execute()
+        
+        if not result.data:
             raise UnauthorizedError("User not found")
         
+        user_data = result.data
+        
         return User(
-            id=str(user_data["id"]),
+            id=user_data["id"],
             email=user_data["email"],
-            name=user_data.get("name") or "",
+            name=user_data["name"],
             role=UserRole(user_data["role"]),
             avatar_url=user_data.get("avatar_url"),
             is_verified=user_data.get("is_verified", False),

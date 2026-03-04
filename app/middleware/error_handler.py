@@ -86,9 +86,18 @@ async def app_exception_handler(request: Request, exc: AppError) -> JSONResponse
     if exc.errors:
         response_content["errors"] = exc.errors
     
+    origin = request.headers.get("origin", "")
+    cors_headers = {
+        "Access-Control-Allow-Origin": origin or "*",
+        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    }
+    
     return JSONResponse(
         status_code=exc.status_code,
-        content=response_content
+        content=response_content,
+        headers=cors_headers,
     )
 
 
@@ -97,10 +106,17 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
     
     logger.exception(f"Unexpected error: {exc}")
     
+    origin = request.headers.get("origin", "")
+    cors_headers = {
+        "Access-Control-Allow-Origin": origin or "*",
+        "Access-Control-Allow-Credentials": "true",
+    }
+    
     return JSONResponse(
         status_code=500,
         content={
             "success": False,
             "error": "Internal server error",
-        }
+        },
+        headers=cors_headers,
     )

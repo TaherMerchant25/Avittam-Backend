@@ -320,17 +320,17 @@ class CreatePaymentOrder(BaseModel):
     description: Optional[str] = None
 
 
+class CreateRegistrationOrder(BaseModel):
+    """Razorpay order for unauthenticated mentee registration fee payment."""
+    amount: int = Field(..., gt=0, description="Amount in paise (e.g. 49900 = ₹499)")
+    email: str
+    name: str
+
+
 class VerifyPayment(BaseModel):
     razorpay_order_id: str
     razorpay_payment_id: str
     razorpay_signature: str
-
-
-class CreateRegistrationOrder(BaseModel):
-    """Mentee registration fee order (unauthenticated)"""
-    email: str
-    name: str  # Full name, will be split into first/last
-    amount: int  # Amount in paise
 
 
 # =====================================================
