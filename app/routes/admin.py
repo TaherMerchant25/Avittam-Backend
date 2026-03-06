@@ -132,23 +132,27 @@ async def admin_adjust_coins(
 
     supabase = get_supabase_admin()
 
-    # Verify target user exists
-    user_res = supabase.table("users").select("id, name, email").eq("id", body.user_id).execute()
+    # Verify target user exists and fetch their role
+    user_res = supabase.table("users").select("id, name, email, role").eq("id", body.user_id).execute()
     if not user_res.data:
         raise NotFoundError("User not found")
     target_user = user_res.data[0]
 
-    # Get or create mentorship wallet (used as the admin-adjustable coin wallet)
+    # Choose the correct wallet type based on role:
+    # - mentors  → "mentorship" wallet
+    # - mentees / guests → "student" wallet
+    target_wallet_type = "mentorship" if target_user.get("role") == "mentor" else "student"
+
     wallet_res = supabase.table("wallets").select("*").eq(
         "user_id", body.user_id
-    ).eq("type", "mentorship").execute()
+    ).eq("type", target_wallet_type).execute()
 
     if wallet_res.data:
         wallet = wallet_res.data[0]
     else:
         new_wallet = supabase.table("wallets").insert({
             "user_id": body.user_id,
-            "type": "mentorship",
+            "type": target_wallet_type,
             "balance": 0,
             "total_credited": 0,
             "total_debited": 0,
