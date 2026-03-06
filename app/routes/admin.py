@@ -192,7 +192,8 @@ async def admin_adjust_coins(
     if txn_amount > 0:
         supabase.table("wallet_transactions").insert({
             "wallet_id": wallet_id,
-            "type": txn_type,
+            "tx_type": "credit" if txn_type == "admin_credit" else "debit",
+            "category": txn_type,   # "admin_credit" or "admin_deduct"
             "amount": txn_amount,
             "balance_after": new_balance,
             "description": f"[Admin] {body.reason or 'Manual adjustment'} (by {admin_user.email})",

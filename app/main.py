@@ -194,7 +194,7 @@ async def health_check():
         "success": True,
         "message": "MentorGold API is running",
         "timestamp": __import__("datetime").datetime.now().isoformat(),
-        "version": "1.0.0",
+        "version": "1.1.0",  # admin coins/adjust fix: tx_type+category columns
     }
 
 
