@@ -33,11 +33,16 @@ router = APIRouter()
 # ─────────────────────────────────────────────────────
 
 @router.get("/auth/url", response_model=ApiResponse)
-async def zoom_auth_url(user: User = Depends(get_current_user)):
+async def zoom_auth_url(
+    return_url: Optional[str] = None,
+    user: User = Depends(get_current_user),
+):
     """Return the Zoom OAuth authorization URL for the authenticated mentor."""
     if not settings.zoom_client_id:
         raise BadRequestError("Zoom integration is not configured on this server.")
-    url = get_zoom_auth_url(user.id)
+    # Fallback to the configured frontend URL if no return_url is provided
+    effective_return = return_url or settings.frontend_url.rstrip("/")
+    url = get_zoom_auth_url(user.id, return_url=effective_return)
     return {"success": True, "data": {"auth_url": url}}
 
 
@@ -52,39 +57,43 @@ async def zoom_auth_callback(
     error: Optional[str] = None,
 ):
     """Handle Zoom OAuth callback — exchange code for tokens and redirect."""
-    frontend = settings.frontend_url.rstrip("/")
+    default_frontend = settings.frontend_url.rstrip("/")
 
     if error:
         logger.warning(f"Zoom OAuth error: {error}")
-        return RedirectResponse(url=f"{frontend}/?zoom_error={error}")
+        return RedirectResponse(url=f"{default_frontend}/?zoom_error={error}")
 
     if not code:
-        return RedirectResponse(url=f"{frontend}/?zoom_error=missing_code")
+        return RedirectResponse(url=f"{default_frontend}/?zoom_error=missing_code")
 
-    # Decode state → get user_id
+    # Decode state → get user_id + returnUrl
     # State was encoded with urlsafe_b64encode + stripped padding; restore padding before decode.
     user_id: Optional[str] = None
+    return_to: str = default_frontend
     if state:
         try:
             padded = state + "=" * (4 - len(state) % 4)
             decoded = json.loads(base64.urlsafe_b64decode(padded).decode())
             user_id = decoded.get("userId")
-            logger.debug(f"Zoom callback state decoded → user_id={user_id}")
+            # Use the caller's origin so localhost redirects back to localhost
+            if decoded.get("returnUrl"):
+                return_to = decoded["returnUrl"].rstrip("/")
+            logger.debug(f"Zoom callback state decoded → user_id={user_id} return_to={return_to}")
         except Exception as exc:
             logger.warning(f"Zoom state decode failed (state={state!r}): {exc}")
 
     if not user_id:
         logger.warning(f"Zoom callback: invalid or missing state (state={state!r})")
-        return RedirectResponse(url=f"{frontend}/?zoom_error=invalid_state")
+        return RedirectResponse(url=f"{return_to}/?zoom_error=invalid_state")
 
     try:
         tokens = await exchange_code_for_tokens(code)
         store_zoom_tokens(user_id, tokens)
-        logger.info(f"✅ Zoom connected for user {user_id}")
-        return RedirectResponse(url=f"{frontend}/?zoom_connected=true")
+        logger.info(f"✅ Zoom connected for user {user_id}, redirecting to {return_to}")
+        return RedirectResponse(url=f"{return_to}/?zoom_connected=true")
     except Exception as exc:
         logger.error(f"Zoom token exchange failed for user {user_id}: {exc}")
-        return RedirectResponse(url=f"{frontend}/?zoom_error=token_exchange_failed")
+        return RedirectResponse(url=f"{return_to}/?zoom_error=token_exchange_failed")
 
 
 # ─────────────────────────────────────────────────────

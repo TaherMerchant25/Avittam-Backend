@@ -29,11 +29,13 @@ def _basic_auth_header() -> str:
     return "Basic " + base64.b64encode(raw.encode()).decode()
 
 
-def get_zoom_auth_url(user_id: str) -> str:
+def get_zoom_auth_url(user_id: str, return_url: str = "") -> str:
     """Return the Zoom OAuth authorization URL for this user."""
     from urllib.parse import urlencode
-    # Use URL-safe base64 without padding so = / + / / chars never corrupt the state param
-    state = base64.urlsafe_b64encode(json.dumps({"userId": user_id}).encode()).decode().rstrip("=")
+    # Encode both userId and returnUrl in the state so the callback can
+    # redirect back to wherever the user initiated the flow (localhost or prod).
+    state_payload = {"userId": user_id, "returnUrl": return_url}
+    state = base64.urlsafe_b64encode(json.dumps(state_payload).encode()).decode().rstrip("=")
     params = {
         "response_type": "code",
         "client_id": settings.zoom_client_id,
