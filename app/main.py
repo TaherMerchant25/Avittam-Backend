@@ -157,7 +157,17 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     logger.info(f"📨 {request.method} {request.url.path}")
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        logger.error(f"Unhandled exception on {request.method} {request.url.path}: {exc}")
+        origin = request.headers.get("origin", "")
+        headers = _cors_headers(origin) if _is_allowed_origin(origin) else {}
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": "Internal server error"},
+            headers=headers,
+        )
     logger.info(f"📤 {request.method} {request.url.path} - {response.status_code}")
     return response
 

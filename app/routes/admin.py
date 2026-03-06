@@ -94,13 +94,17 @@ async def list_all_users(
     result = query.limit(200).execute()
     users = result.data or []
 
-    # Fetch coin_wallet balances for all returned users
+    # Fetch combined wallet balances (mentorship + referral) for all returned users
     if users:
         user_ids = [u["id"] for u in users]
         wallets_res = supabase.table("wallets").select(
-            "user_id, balance"
-        ).eq("type", "coin_wallet").in_("user_id", user_ids).execute()
-        balance_map = {w["user_id"]: w["balance"] for w in (wallets_res.data or [])}
+            "user_id, balance, type"
+        ).in_("type", ["mentorship", "referral"]).in_("user_id", user_ids).execute()
+        # Sum mentorship + referral into a single coin_balance per user
+        balance_map: dict = {}
+        for w in (wallets_res.data or []):
+            uid = w["user_id"]
+            balance_map[uid] = balance_map.get(uid, 0) + (w["balance"] or 0)
         for u in users:
             u["coin_balance"] = balance_map.get(u["id"], 0)
 
@@ -134,17 +138,17 @@ async def admin_adjust_coins(
         raise NotFoundError("User not found")
     target_user = user_res.data[0]
 
-    # Get or create coin_wallet
+    # Get or create mentorship wallet (used as the admin-adjustable coin wallet)
     wallet_res = supabase.table("wallets").select("*").eq(
         "user_id", body.user_id
-    ).eq("type", "coin_wallet").execute()
+    ).eq("type", "mentorship").execute()
 
     if wallet_res.data:
         wallet = wallet_res.data[0]
     else:
         new_wallet = supabase.table("wallets").insert({
             "user_id": body.user_id,
-            "type": "coin_wallet",
+            "type": "mentorship",
             "balance": 0,
             "total_credited": 0,
             "total_debited": 0,
