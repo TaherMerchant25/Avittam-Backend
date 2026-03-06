@@ -168,31 +168,41 @@ async def schedule_session_with_zoom(
     zoom_meeting_id: str = str(zoom_meeting["id"])
 
     # ── 3. Create session row ────────────────────────────────────────────
-    session_insert = {
+    # Base columns that always exist (001_initial_schema.sql)
+    session_insert: dict = {
         "mentor_id": user.id,
         "mentee_id": req["mentee_id"],
         "request_id": body.request_id,
         "scheduled_at": body.start_time,
         "duration_minutes": body.duration_minutes,
-        "status": "scheduled",
-        "meeting_url": join_url,
-        "zoom_meeting_id": zoom_meeting_id,
-        "zoom_join_url": join_url,
-        "zoom_start_url": start_url,
+        "status": "scheduled",          # session_status enum: scheduled|ongoing|completed|cancelled|no_show
+        "meeting_url": join_url,        # base column always present
     }
     if body.notes:
         session_insert["mentor_notes"] = body.notes
 
-    sess_res = supabase.table("sessions").insert(session_insert).execute()
+    # Zoom-specific columns added by migration 020_zoom_integration.sql
+    # Try inserting them; if the migration hasn't been run they'll be ignored via try/except below
+    session_insert_with_zoom = {
+        **session_insert,
+        "zoom_meeting_id": zoom_meeting_id,
+        "zoom_join_url": join_url,
+        "zoom_start_url": start_url,
+    }
+
+    sess_res = supabase.table("sessions").insert(session_insert_with_zoom).execute()
+    if not sess_res.data:
+        # Fallback: retry without zoom columns (migration 020 not yet run)
+        sess_res = supabase.table("sessions").insert(session_insert).execute()
     if not sess_res.data:
         raise BadRequestError("Failed to create session record")
 
     session = sess_res.data[0]
 
     # ── 4. Update request status ─────────────────────────────────────────
-    supabase.table("mentor_requests").update({"status": "scheduled"}).eq(
-        "id", body.request_id
-    ).execute()
+    # request_status enum only has: pending, locked, accepted, expired, cancelled
+    # "accepted" is the terminal state once a session is booked — leave it as-is.
+    # (session_status on the sessions table tracks scheduled/ongoing/completed)
 
     # ── 5. Notify mentee ─────────────────────────────────────────────────
     mentor_res = supabase.table("users").select("name").eq("id", user.id).single().execute()
@@ -200,7 +210,7 @@ async def schedule_session_with_zoom(
     try:
         supabase.table("notifications").insert({
             "user_id": req["mentee_id"],
-            "type": "session_scheduled",
+            "type": "session",        # notification_type enum: request|session|payment|system|chat
             "title": "Session Scheduled! 🎉",
             "message": (
                 f"{mentor_name} has scheduled your session on "
