@@ -62,15 +62,19 @@ async def zoom_auth_callback(
         return RedirectResponse(url=f"{frontend}/?zoom_error=missing_code")
 
     # Decode state → get user_id
+    # State was encoded with urlsafe_b64encode + stripped padding; restore padding before decode.
     user_id: Optional[str] = None
     if state:
         try:
-            decoded = json.loads(base64.b64decode(state).decode())
+            padded = state + "=" * (4 - len(state) % 4)
+            decoded = json.loads(base64.urlsafe_b64decode(padded).decode())
             user_id = decoded.get("userId")
-        except Exception:
-            pass
+            logger.debug(f"Zoom callback state decoded → user_id={user_id}")
+        except Exception as exc:
+            logger.warning(f"Zoom state decode failed (state={state!r}): {exc}")
 
     if not user_id:
+        logger.warning(f"Zoom callback: invalid or missing state (state={state!r})")
         return RedirectResponse(url=f"{frontend}/?zoom_error=invalid_state")
 
     try:
@@ -79,7 +83,7 @@ async def zoom_auth_callback(
         logger.info(f"✅ Zoom connected for user {user_id}")
         return RedirectResponse(url=f"{frontend}/?zoom_connected=true")
     except Exception as exc:
-        logger.error(f"Zoom token exchange failed: {exc}")
+        logger.error(f"Zoom token exchange failed for user {user_id}: {exc}")
         return RedirectResponse(url=f"{frontend}/?zoom_error=token_exchange_failed")
 
 

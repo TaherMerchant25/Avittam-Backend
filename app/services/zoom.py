@@ -32,7 +32,8 @@ def _basic_auth_header() -> str:
 def get_zoom_auth_url(user_id: str) -> str:
     """Return the Zoom OAuth authorization URL for this user."""
     from urllib.parse import urlencode
-    state = base64.b64encode(json.dumps({"userId": user_id}).encode()).decode()
+    # Use URL-safe base64 without padding so = / + / / chars never corrupt the state param
+    state = base64.urlsafe_b64encode(json.dumps({"userId": user_id}).encode()).decode().rstrip("=")
     params = {
         "response_type": "code",
         "client_id": settings.zoom_client_id,
@@ -54,6 +55,8 @@ async def exchange_code_for_tokens(code: str) -> dict:
                 "redirect_uri": settings.zoom_redirect_uri,
             },
         )
+        if not resp.is_success:
+            logger.error(f"Zoom token exchange HTTP {resp.status_code}: {resp.text}")
         resp.raise_for_status()
         return resp.json()
 
