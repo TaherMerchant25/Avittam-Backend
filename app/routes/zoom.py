@@ -183,11 +183,11 @@ async def schedule_session_with_zoom(
     if body.notes:
         session_insert["mentor_notes"] = body.notes
 
-    sess_res = supabase.table("sessions").insert(session_insert).select().single().execute()
+    sess_res = supabase.table("sessions").insert(session_insert).execute()
     if not sess_res.data:
         raise BadRequestError("Failed to create session record")
 
-    session = sess_res.data
+    session = sess_res.data[0]
 
     # ── 4. Update request status ─────────────────────────────────────────
     supabase.table("mentor_requests").update({"status": "scheduled"}).eq(
