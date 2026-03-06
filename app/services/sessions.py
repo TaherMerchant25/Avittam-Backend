@@ -8,7 +8,6 @@ from typing import Optional, List, Dict, Any
 from loguru import logger
 
 from app.config.database import get_supabase_admin
-from app.services.google_meet import create_google_meet_session, cancel_google_meet_session
 from app.services.notifications import create_notification
 from app.models.schemas import (
     Session,
@@ -62,38 +61,14 @@ async def create_session(
     start_time = input_data.scheduled_at
     end_time = start_time + timedelta(minutes=duration)
     
-    meeting_details = None
-    
-    # Create Google Meet session if requested
-    if create_meeting:
-        try:
-            meeting_details = await create_google_meet_session(
-                input_data.mentor_id,
-                {
-                    "summary": input_data.title or f"MentorGold Session: {mentor['name']} & {mentee['name']}",
-                    "description": input_data.description or "Mentorship session via MentorGold",
-                    "start_time": start_time.isoformat(),
-                    "end_time": end_time.isoformat(),
-                    "attendees": [
-                        {"email": mentor["email"], "name": mentor["name"]},
-                        {"email": mentee["email"], "name": mentee["name"]},
-                    ],
-                }
-            )
-        except Exception as e:
-            logger.error(f"Failed to create Google Meet: {e}")
-            # Continue without meeting link
-    
-    # Create session in database
+    # Create session in database (Zoom meeting is created separately via /api/zoom/schedule-session)
     session_data = {
         "mentor_id": input_data.mentor_id,
         "mentee_id": input_data.mentee_id,
         "request_id": input_data.request_id,
         "scheduled_at": start_time.isoformat(),
         "duration_minutes": duration,
-        "meeting_url": meeting_details.get("meeting_url") if meeting_details else None,
-        "google_meet_id": meeting_details.get("meeting_id") if meeting_details else None,
-        "google_calendar_event_id": meeting_details.get("calendar_event_id") if meeting_details else None,
+        "meeting_url": None,
         "status": SessionStatus.SCHEDULED.value,
     }
     
@@ -240,13 +215,6 @@ async def cancel_session(
     
     if session["status"] in [SessionStatus.COMPLETED.value, SessionStatus.CANCELLED.value]:
         raise ConflictError("Cannot cancel this session")
-    
-    # Cancel Google Meet if exists
-    if session.get("google_calendar_event_id"):
-        try:
-            await cancel_google_meet_session(session["mentor_id"], session["google_calendar_event_id"])
-        except Exception as e:
-            logger.error(f"Failed to cancel Google Meet: {e}")
     
     update_data = {
         "status": SessionStatus.CANCELLED.value,

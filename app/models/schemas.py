@@ -146,8 +146,9 @@ class Session(SessionBase):
     request_id: Optional[str] = None
     long_term_mentorship_id: Optional[str] = None
     meeting_url: Optional[str] = None
-    google_meet_id: Optional[str] = None
-    google_calendar_event_id: Optional[str] = None
+    zoom_meeting_id: Optional[str] = None
+    zoom_join_url: Optional[str] = None
+    zoom_start_url: Optional[str] = None
     status: SessionStatus = SessionStatus.SCHEDULED
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None

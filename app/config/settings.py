@@ -31,12 +31,13 @@ class Settings(BaseSettings):
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
     jwt_expiration_hours: int = Field(default=24, alias="JWT_EXPIRATION_HOURS")
     
-    # Google OAuth Configuration
-    google_client_id: Optional[str] = Field(default=None, alias="GOOGLE_CLIENT_ID")
-    google_client_secret: Optional[str] = Field(default=None, alias="GOOGLE_CLIENT_SECRET")
-    google_redirect_uri: str = Field(
-        default="http://localhost:3001/api/auth/google/callback",
-        alias="GOOGLE_REDIRECT_URI"
+    # Zoom OAuth Configuration
+    zoom_client_id: Optional[str] = Field(default=None, alias="ZOOM_CLIENT_ID")
+    zoom_client_secret: Optional[str] = Field(default=None, alias="ZOOM_CLIENT_SECRET")
+    zoom_secret_token: Optional[str] = Field(default=None, alias="ZOOM_SECRET_TOKEN")
+    zoom_redirect_uri: str = Field(
+        default="https://avittam-backend-yr1z.onrender.com/api/zoom/auth/callback",
+        alias="ZOOM_REDIRECT_URI"
     )
     
     # Rate Limiting

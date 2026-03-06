@@ -15,7 +15,7 @@ from loguru import logger
 import sys
 
 from app.config.settings import settings
-from app.routes import sessions, mentors, meetings, notifications, payments, wallets, calcom, admin, chat
+from app.routes import sessions, mentors, zoom, notifications, payments, wallets, admin, chat
 from app.middleware.error_handler import app_exception_handler, AppError
 
 # Known allowed origins (never rely solely on env var for CORS)
@@ -28,6 +28,16 @@ _ALLOWED_ORIGINS = {
 }
 # Also add whatever FRONTEND_URL is set to (strip trailing slash)
 _ALLOWED_ORIGINS.add(settings.frontend_url.rstrip("/"))
+
+
+def _is_allowed_origin(origin: str) -> bool:
+    """Return True if origin is explicitly allowed or is a Vercel preview URL."""
+    if origin in _ALLOWED_ORIGINS:
+        return True
+    # Allow all Vercel preview deployments (avittam-git-*.vercel.app)
+    if origin.endswith(".vercel.app"):
+        return True
+    return False
 
 
 # Configure logging
@@ -65,7 +75,7 @@ async def lifespan(app: FastAPI):
 # Create FastAPI application
 app = FastAPI(
     title="MentorGold API",
-    description="Backend API for MentorGold - Session booking, Google Meet integration, and mentor management",
+    description="Backend API for MentorGold - Session booking, Zoom integration, and mentor management",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -103,7 +113,7 @@ async def cors_middleware(request: Request, call_next):
     # Handle preflight immediately
     if request.method == "OPTIONS":
         resp = Response(status_code=200)
-        if origin in _ALLOWED_ORIGINS:
+        if _is_allowed_origin(origin):
             for k, v in _cors_headers(origin).items():
                 resp.headers[k] = v
         return resp
@@ -111,9 +121,11 @@ async def cors_middleware(request: Request, call_next):
     response = await call_next(request)
 
     # Inject CORS headers into every response from an allowed origin
-    if origin in _ALLOWED_ORIGINS:
+    if _is_allowed_origin(origin):
         for k, v in _cors_headers(origin).items():
             response.headers[k] = v
+    elif origin:
+        logger.warning(f"CORS blocked origin: {origin}")
 
     return response
 
@@ -122,7 +134,7 @@ async def cors_middleware(request: Request, call_next):
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     origin = request.headers.get("origin", "")
-    headers = _cors_headers(origin) if origin in _ALLOWED_ORIGINS else {}
+    headers = _cors_headers(origin) if _is_allowed_origin(origin) else {}
     return JSONResponse(
         status_code=exc.status_code,
         content={"success": False, "error": str(exc.detail)},
@@ -179,11 +191,10 @@ async def health_check():
 # Mount route modules
 app.include_router(sessions.router, prefix="/api/sessions", tags=["Sessions"])
 app.include_router(mentors.router, prefix="/api/mentors", tags=["Mentors"])
-app.include_router(meetings.router, prefix="/api/meetings", tags=["Meetings"])
+app.include_router(zoom.router, prefix="/api/zoom", tags=["Zoom"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["Notifications"])
 app.include_router(payments.router, prefix="/api/payments", tags=["Payments"])
 app.include_router(wallets.router, prefix="/api/wallets", tags=["Wallets"])
-app.include_router(calcom.router, prefix="/api/calcom", tags=["Cal.com"])
 app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
 app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
 

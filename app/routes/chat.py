@@ -62,25 +62,40 @@ async def get_session_chat_status(session_id: str, user: User = Depends(get_curr
     """
     Get chat status for a session.
     Returns the existing channel if it exists and is_active.
-    Does NOT auto-create — chat is only created after student pays via /book/coins.
+    Also returns coin_cost so the frontend can show the price upfront.
+    Does NOT auto-create — chat is only created after student pays via /pay-coins.
     """
     supabase = get_supabase_admin()
+
+    # Determine coin cost from the session's associated request bounty
+    coin_cost = 500.0
+    try:
+        sess = supabase.table("sessions").select("request_id").eq("id", session_id).execute()
+        if sess.data and sess.data[0].get("request_id"):
+            req = supabase.table("mentor_requests").select("bounty").eq(
+                "id", sess.data[0]["request_id"]
+            ).execute()
+            if req.data and req.data[0].get("bounty"):
+                coin_cost = float(req.data[0]["bounty"])
+    except Exception:
+        pass
+
     result = supabase.table("chat_channels").select("*").eq("session_id", session_id).execute()
     channel = result.data[0] if result.data else None
 
-    # Only return channel if it was explicitly created (payment confirmed)
-    # Never auto-create here — that bypasses the coin payment gate.
     if not channel:
         return {
             "success": True,
             "chatChannel": None,
             "isActive": False,
+            "coin_cost": coin_cost,
         }
 
     return {
         "success": True,
         "chatChannel": channel,
         "isActive": channel.get("is_active", False),
+        "coin_cost": coin_cost,
     }
 
 
@@ -91,9 +106,8 @@ async def get_session_chat_status(session_id: str, user: User = Depends(get_curr
 async def create_session_chat_channel(session_id: str, user: User = Depends(get_current_user)):
     """
     Create or restore a chat channel for a booked session.
-    Called when a session exists in My Sessions but the chat channel creation
-    failed silently during booking. No re-payment required — the session being
-    in 'scheduled'/'ongoing' state implies payment was already made.
+    RESTRICTED TO MENTORS ONLY — mentees must unlock chat via
+    POST /api/chat/channels/{session_id}/pay-coins to prevent bypassing payment.
     """
     supabase = get_supabase_admin()
 
@@ -103,8 +117,9 @@ async def create_session_chat_channel(session_id: str, user: User = Depends(get_
         raise NotFoundError("Session not found")
     session = session_result.data[0]
 
-    if session["mentor_id"] != user.id and session["mentee_id"] != user.id:
-        raise BadRequestError("Not a participant of this session")
+    # Only the mentor of this session may use this endpoint
+    if session["mentor_id"] != user.id:
+        raise BadRequestError("Only the mentor of this session can restore a chat channel via this endpoint.")
 
     # If channel already exists just return it (activate if inactive)
     existing = supabase.table("chat_channels").select("*").eq("session_id", session_id).execute()
@@ -153,76 +168,198 @@ async def create_session_chat_channel(session_id: str, user: User = Depends(get_
 
 
 # =====================================================
-# POST /api/chat/channels/{session_id}/pay
+# POST /api/chat/channels/{session_id}/pay-coins
+# Mentee pays with Avittam Coins to unlock chat.
+# Mentor receives 70% of the cost immediately.
 # =====================================================
-class ChatPayResponse(BaseModel):
-    pass
 
-
-@router.post("/channels/{session_id}/pay")
-async def create_chat_payment_order(session_id: str, user: User = Depends(get_current_user)):
-    """Create Razorpay order for chat unlock"""
-    if not settings.razorpay_key_id or not settings.razorpay_key_secret:
-        raise BadRequestError("Razorpay not configured")
+@router.post("/channels/{session_id}/pay-coins")
+async def pay_chat_with_coins(session_id: str, user: User = Depends(get_current_user)):
+    """Unlock chat by paying with Avittam Coins. Mentor gets 70%."""
+    from fastapi.responses import JSONResponse as _JSONResponse
+    from app.services.wallets import get_or_create_wallet
 
     supabase = get_supabase_admin()
 
+    # ── 1. Fetch session & verify caller is the mentee ──────────────────
     session_result = supabase.table("sessions").select("*").eq("id", session_id).single().execute()
-
     if not session_result.data:
         raise NotFoundError("Session not found")
     session = session_result.data
 
-    if session["mentor_id"] != user.id and session["mentee_id"] != user.id:
-        raise BadRequestError("Not a participant of this session")
+    if session["mentee_id"] != user.id:
+        raise BadRequestError("Only the mentee can pay to unlock chat")
 
+    mentor_id = session["mentor_id"]
+    mentee_id = user.id
+
+    # ── 2. Already unlocked? Return early ──────────────────────────────
     existing = supabase.table("chat_channels").select("*").eq("session_id", session_id).execute()
     if existing.data and existing.data[0].get("is_active"):
         return {
             "success": True,
             "message": "Chat already unlocked",
-            "channel": existing.data[0],
+            "chatChannel": existing.data[0],
+            "isActive": True,
             "alreadyPaid": True,
         }
 
-    bounty = 500
+    # ── 3. Determine coin cost from bounty ─────────────────────────────
+    coin_cost = 500.0
     if session.get("request_id"):
-        req = supabase.table("mentor_requests").select("bounty").eq("id", session["request_id"]).execute()
-        if req.data:
-            bounty = req.data[0].get("bounty") or 500
-    amount = int(bounty * 100)
+        req = supabase.table("mentor_requests").select("bounty").eq(
+            "id", session["request_id"]
+        ).execute()
+        if req.data and req.data[0].get("bounty"):
+            coin_cost = float(req.data[0]["bounty"])
 
-    other_id = session["mentee_id"] if session["mentor_id"] == user.id else session["mentor_id"]
-    other = supabase.table("users").select("name").eq("id", other_id).single().execute()
-    other_name = other.data.get("name", "participant") if other.data else "participant"
-    payment_result = supabase.table("payments").insert({
-        "user_id": user.id,
+    mentor_share = round(coin_cost * 0.70, 2)
+
+    # ── 4. Check mentee wallet balance ─────────────────────────────────
+    mentee_wallet = get_or_create_wallet(mentee_id, "student")
+    mentee_balance = float(mentee_wallet["balance"])
+
+    if mentee_balance < coin_cost:
+        return _JSONResponse(
+            status_code=402,
+            content={
+                "success": False,
+                "error": (
+                    f"Insufficient Avittam Coins. "
+                    f"You need {coin_cost:.0f} coins but only have {mentee_balance:.0f}. "
+                    f"Please load more coins from your wallet."
+                ),
+                "coin_cost": coin_cost,
+                "current_balance": mentee_balance,
+            },
+        )
+
+    # ── 5. Debit mentee student wallet ─────────────────────────────────
+    new_mentee_balance = mentee_balance - coin_cost
+    supabase.table("wallets").update({
+        "balance": new_mentee_balance,
+        "total_debited": float(mentee_wallet["total_debited"]) + coin_cost,
+    }).eq("id", mentee_wallet["id"]).execute()
+
+    supabase.table("wallet_transactions").insert({
+        "wallet_id": mentee_wallet["id"],
+        "tx_type": "debit",
+        "category": "session_payment",
+        "amount": coin_cost,
+        "balance_after": new_mentee_balance,
         "session_id": session_id,
-        "amount": amount / 100,
-        "currency": "INR",
-        "status": "pending",
-        "description": f"Chat unlock for session with {other_name}",
-        "metadata": {"type": "chat_unlock", "session_id": session_id},
+        "related_user_id": mentor_id,
+        "description": f"Chat unlock: paid {coin_cost:.0f} Avittam Coins",
     }).execute()
 
-    if not payment_result.data:
-        raise BadRequestError("Failed to create payment")
-    payment = payment_result.data[0]
+    # ── 6. Credit mentor mentorship wallet (70%) ───────────────────────
+    mentor_wallet = get_or_create_wallet(mentor_id, "mentorship")
+    new_mentor_balance = float(mentor_wallet["balance"]) + mentor_share
+    supabase.table("wallets").update({
+        "balance": new_mentor_balance,
+        "total_credited": float(mentor_wallet["total_credited"]) + mentor_share,
+    }).eq("id", mentor_wallet["id"]).execute()
 
-    receipt = f"chat_{session_id[:8]}_{int(__import__('time').time() * 1000)}"
-    order = create_razorpay_order(amount, receipt, {
+    supabase.table("wallet_transactions").insert({
+        "wallet_id": mentor_wallet["id"],
+        "tx_type": "credit",
+        "category": "session_earning",
+        "amount": mentor_share,
+        "balance_after": new_mentor_balance,
         "session_id": session_id,
-        "payment_id": payment["id"],
-        "type": "chat_unlock",
-    })
+        "related_user_id": mentee_id,
+        "description": f"Chat unlock earning: {mentor_share:.0f} coins (70% of {coin_cost:.0f})",
+    }).execute()
 
-    supabase.table("payments").update({"razorpay_order_id": order["id"]}).eq("id", payment["id"]).execute()
+    # ── 7. Fetch user display data for channel creation ────────────────
+    mentor_result = supabase.table("users").select("name, avatar_url").eq(
+        "id", mentor_id
+    ).single().execute()
+    mentee_result = supabase.table("users").select("name, avatar_url").eq(
+        "id", mentee_id
+    ).single().execute()
+    mentor_data = mentor_result.data or {}
+    mentee_data = mentee_result.data or {}
+
+    # ── 8. Create / activate Stream Chat channel ───────────────────────
+    stream_channel_id: Optional[str] = None
+    if existing.data:
+        channel_row = existing.data[0]
+        stream_channel_id = channel_row["stream_channel_id"]
+        try:
+            stream_chat_service.activate_channel(stream_channel_id)
+        except Exception as _e:
+            logger.warning(f"Could not activate stream channel: {_e}")
+        supabase.table("chat_channels").update({"is_active": True}).eq(
+            "id", channel_row["id"]
+        ).execute()
+    else:
+        topic = "Mentorship Session"
+        if session.get("request_id"):
+            req2 = supabase.table("mentor_requests").select("title, topic").eq(
+                "id", session["request_id"]
+            ).execute()
+            if req2.data:
+                topic = req2.data[0].get("topic") or req2.data[0].get("title") or topic
+
+        stream_chat_service.ensure_system_user()
+        stream_chat_service.upsert_stream_user(
+            mentor_id, mentor_data.get("name", "Mentor"), mentor_data.get("avatar_url"), "mentor"
+        )
+        stream_chat_service.upsert_stream_user(
+            mentee_id, mentee_data.get("name", "Student"), mentee_data.get("avatar_url"), "mentee"
+        )
+        stream_channel_id = stream_chat_service.create_session_channel(
+            session_id, mentor_id, mentee_id, topic
+        )
+        stream_chat_service.activate_channel(stream_channel_id)
+        supabase.table("chat_channels").insert({
+            "session_id": session_id,
+            "mentor_id": mentor_id,
+            "mentee_id": mentee_id,
+            "stream_channel_id": stream_channel_id,
+            "is_active": True,
+        }).execute()
+
+    # ── 9. Notify mentor ───────────────────────────────────────────────
+    try:
+        supabase.table("notifications").insert({
+            "user_id": mentor_id,
+            "type": "chat",
+            "title": "Chat Unlocked! 💬",
+            "message": (
+                f"{mentee_data.get('name', 'Student')} has paid "
+                f"{coin_cost:.0f} coins to unlock chat for your session."
+            ),
+            "related_entity_type": "chat_channel",
+            "related_entity_id": session_id,
+            "action_url": f"/chat/{stream_channel_id}",
+        }).execute()
+    except Exception as _ne:
+        logger.warning(f"Could not send unlock notification: {_ne}")
+
+    channel_result = supabase.table("chat_channels").select("*").eq(
+        "session_id", session_id
+    ).execute()
+    channel = channel_result.data[0] if channel_result.data else {
+        "session_id": session_id,
+        "stream_channel_id": stream_channel_id,
+        "is_active": True,
+    }
+
+    logger.info(
+        f"Chat unlocked for session {session_id}: mentee {mentee_id} paid {coin_cost} coins, "
+        f"mentor {mentor_id} received {mentor_share} coins."
+    )
 
     return {
         "success": True,
-        "order": {"id": order["id"], "amount": order["amount"], "currency": order["currency"]},
-        "paymentId": payment["id"],
-        "keyId": settings.razorpay_key_id,
+        "message": f"Chat unlocked! {coin_cost:.0f} coins paid, mentor credited {mentor_share:.0f} coins.",
+        "chatChannel": channel,
+        "isActive": True,
+        "coins_charged": coin_cost,
+        "mentor_credited": mentor_share,
+        "new_balance": new_mentee_balance,
     }
 
 
@@ -309,117 +446,3 @@ async def stream_chat_webhook(request: Request):
         logger.error(f"[ChatWebhook] Error handling command '{cmd}': {e}")
 
     return {"success": True}
-
-
-def create_razorpay_order(amount: int, receipt: str, notes: dict):
-    import base64
-    import httpx
-    auth = base64.b64encode(
-        f"{settings.razorpay_key_id}:{settings.razorpay_key_secret}".encode()
-    ).decode()
-    with httpx.Client() as client:
-        r = client.post(
-            "https://api.razorpay.com/v1/orders",
-            headers={"Content-Type": "application/json", "Authorization": f"Basic {auth}"},
-            json={"amount": amount, "currency": "INR", "receipt": receipt, "notes": notes},
-        )
-    if r.status_code != 200:
-        raise BadRequestError(r.json().get("error", {}).get("description", "Failed to create order"))
-    return r.json()
-
-
-# =====================================================
-# POST /api/chat/channels/{session_id}/verify
-# =====================================================
-class VerifyChatBody(BaseModel):
-    razorpay_order_id: str
-    razorpay_payment_id: str
-    razorpay_signature: str
-    paymentId: str
-
-
-@router.post("/channels/{session_id}/verify")
-async def verify_chat_payment(session_id: str, body: VerifyChatBody, user: User = Depends(get_current_user)):
-    """Verify chat payment and unlock channel"""
-    if not settings.razorpay_key_secret:
-        raise BadRequestError("Razorpay not configured")
-
-    msg = f"{body.razorpay_order_id}|{body.razorpay_payment_id}"
-    expected = hmac.new(
-        settings.razorpay_key_secret.encode(),
-        msg.encode(),
-        hashlib.sha256,
-    ).hexdigest()
-    if expected != body.razorpay_signature:
-        raise BadRequestError("Payment verification failed")
-
-    supabase = get_supabase_admin()
-    from datetime import datetime
-    supabase.table("payments").update({
-        "razorpay_payment_id": body.razorpay_payment_id,
-        "razorpay_signature": body.razorpay_signature,
-        "status": "paid",
-        "paid_at": datetime.now().isoformat(),
-    }).eq("id", body.paymentId).execute()
-
-    session_result = supabase.table("sessions").select("*").eq("id", session_id).single().execute()
-    if not session_result.data:
-        raise NotFoundError("Session not found")
-    session = session_result.data
-
-    mentor = supabase.table("users").select("name, avatar_url").eq("id", session["mentor_id"]).single().execute()
-    mentee = supabase.table("users").select("name, avatar_url").eq("id", session["mentee_id"]).single().execute()
-    mentor_data = mentor.data or {}
-    mentee_data = mentee.data or {}
-
-    stream_chat_service.ensure_system_user()
-    stream_chat_service.upsert_stream_user(
-        session["mentor_id"], mentor_data.get("name", "Mentor"), mentor_data.get("avatar_url"), "mentor"
-    )
-    stream_chat_service.upsert_stream_user(
-        session["mentee_id"], mentee_data.get("name", "Student"), mentee_data.get("avatar_url"), "mentee"
-    )
-
-    topic = "Mentorship Session"
-    if session.get("request_id"):
-        req = supabase.table("mentor_requests").select("title, topic").eq("id", session["request_id"]).execute()
-        if req.data:
-            topic = req.data[0].get("topic") or req.data[0].get("title") or topic
-
-    existing = supabase.table("chat_channels").select("*").eq("session_id", session_id).execute()
-    if existing.data:
-        stream_channel_id = existing.data[0]["stream_channel_id"]
-        stream_chat_service.activate_channel(stream_channel_id)
-        supabase.table("chat_channels").update({"is_active": True, "payment_id": body.paymentId}).eq(
-            "id", existing.data[0]["id"]
-        ).execute()
-    else:
-        stream_channel_id = stream_chat_service.create_session_channel(
-            session_id, session["mentor_id"], session["mentee_id"], topic
-        )
-        stream_chat_service.activate_channel(stream_channel_id)
-        supabase.table("chat_channels").insert({
-            "session_id": session_id,
-            "mentor_id": session["mentor_id"],
-            "mentee_id": session["mentee_id"],
-            "stream_channel_id": stream_channel_id,
-            "payment_id": body.paymentId,
-            "is_active": True,
-        }).execute()
-
-    other_id = session["mentee_id"] if user.id == session["mentor_id"] else session["mentor_id"]
-    supabase.table("notifications").insert({
-        "user_id": other_id,
-        "type": "chat",
-        "title": "Chat Unlocked! 💬",
-        "message": f"{user.name or 'A participant'} has unlocked the chat for your session.",
-        "related_entity_type": "chat_channel",
-        "related_entity_id": session_id,
-        "action_url": f"/chat/{stream_channel_id}",
-    }).execute()
-
-    return {
-        "success": True,
-        "message": "Chat unlocked successfully",
-        "channel": {"stream_channel_id": stream_channel_id, "session_id": session_id, "is_active": True},
-    }

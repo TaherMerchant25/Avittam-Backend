@@ -96,27 +96,9 @@ async def book_session_with_coins(body: BookWithCoinsBody, user: User = Depends(
             _log.warning(f"Could not mark request {body.requestId} as booked: {_req_err}")
 
     stream_channel_id = None
-    try:
-        from app.services import stream_chat as stream_chat_service
-        if stream_chat_service.is_stream_chat_configured():
-            stream_channel_id = booking_service.create_chat_channel_for_session(
-                session_id, body.mentorId, user.id, None,
-                mentor.get("name", "Mentor"), mentee_data.get("name", "Student"),
-                mentor.get("avatar_url"), mentee_data.get("avatar_url"),
-                "Mentorship Session Chat",
-            )
-            supabase.table("notifications").insert({
-                "user_id": body.mentorId,
-                "type": "chat",
-                "title": "New Session Booked! 💬",
-                "message": f"{user.name or 'A student'} has booked a session with you. Chat is now unlocked.",
-                "related_entity_type": "chat_channel",
-                "related_entity_id": session_id,
-                "action_url": f"/chat/{stream_channel_id}",
-            }).execute()
-    except Exception as e:
-        from loguru import logger
-        logger.warning(f"Could not create chat channel: {e}")
+    # NOTE: Chat channel is NOT created here.
+    # The student must explicitly pay via POST /api/chat/channels/{session_id}/pay-coins
+    # after booking to unlock chat. This ensures a separate, visible coin transaction.
 
     return {
         "success": True,
@@ -232,28 +214,15 @@ async def verify_session_booking(body: VerifyBookBody, user: User = Depends(requ
     mentor_data = mentor[0] if isinstance(mentor, list) else mentor or {}
     mentee_data = mentee[0] if isinstance(mentee, list) else mentee or {}
 
-    stream_channel_id = booking_service.create_chat_channel_for_session(
-        body.sessionId, session["mentor_id"], session["mentee_id"], body.paymentId,
-        mentor_data.get("name", "Mentor"), mentee_data.get("name", "Student"),
-        mentor_data.get("avatar_url"), mentee_data.get("avatar_url"),
-        "Mentorship Session Chat",
-    )
-
-    supabase.table("notifications").insert({
-        "user_id": session["mentor_id"],
-        "type": "chat",
-        "title": "New Session Booked! 💬",
-        "message": f"{user.name or 'A student'} has booked a session with you. Chat is now unlocked.",
-        "related_entity_type": "chat_channel",
-        "related_entity_id": body.sessionId,
-        "action_url": f"/chat/{stream_channel_id}",
-    }).execute()
+    # NOTE: Chat channel is NOT created here.
+    # The student must explicitly pay via POST /api/chat/channels/{session_id}/pay-coins
+    # after booking to unlock chat.
 
     return {
         "success": True,
         "message": "Session booked successfully",
         "sessionId": body.sessionId,
-        "streamChannelId": stream_channel_id,
+        "streamChannelId": None,
     }
 
 
