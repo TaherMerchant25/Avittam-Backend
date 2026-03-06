@@ -141,14 +141,14 @@ async def schedule_session_with_zoom(
 
     # ── 1. Load & validate the request ──────────────────────────────────
     req_res = supabase.table("mentor_requests").select(
-        "id, status, mentee_id, accepted_mentor_id, bounty, topic, title"
+        "id, status, mentee_id, accepted_by, bounty, topic, title"
     ).eq("id", body.request_id).single().execute()
 
     if not req_res.data:
         raise NotFoundError("Request not found")
 
     req = req_res.data
-    if req["accepted_mentor_id"] != user.id:
+    if req["accepted_by"] != user.id:
         raise BadRequestError("You are not the accepted mentor for this request")
     if req["status"] not in ("accepted", "paid"):
         raise BadRequestError(f"Request must be accepted before scheduling (current: {req['status']})")
