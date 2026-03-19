@@ -2,6 +2,9 @@
 # MENTORGOLD BACKEND API SERVER - FastAPI
 # =====================================================
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,7 +18,7 @@ from loguru import logger
 import sys
 
 from app.config.settings import settings
-from app.routes import sessions, mentors, zoom, notifications, payments, wallets, admin, chat
+from app.routes import sessions, mentors, zoom, notifications, payments, wallets, admin, chat, chatbot
 from app.middleware.error_handler import app_exception_handler, AppError
 
 # Known allowed origins (never rely solely on env var for CORS)
@@ -207,6 +210,7 @@ app.include_router(payments.router, prefix="/api/payments", tags=["Payments"])
 app.include_router(wallets.router, prefix="/api/wallets", tags=["Wallets"])
 app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
 app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
+app.include_router(chatbot.router, prefix="/api", tags=["Chatbot"])
 
 
 # =====================================================

@@ -17,6 +17,7 @@ razorpay==1.4.2
 google-api-python-client==2.114.0
 google-auth==2.26.2
 google-auth-oauthlib==1.2.0
+google-generativeai==0.8.3
 
 # Validation & Serialization
 pydantic==2.10.6
