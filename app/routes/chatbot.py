@@ -4,7 +4,7 @@
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Any, List, Optional
 import os
 from dotenv import load_dotenv
 from loguru import logger
@@ -13,23 +13,35 @@ load_dotenv()
 
 router = APIRouter()
 
-# Check if Gemini is available
+# Check if Gemini is available (Google GenAI SDK — replaces deprecated google.generativeai)
 try:
-    import google.generativeai as genai
-    from google.generativeai.types import HarmCategory, HarmBlockThreshold
+    from google import genai
+    from google.genai import types
+
     GEMINI_AVAILABLE = True
-    
-    # Configure Gemini API
+
     api_key = os.environ.get("GEMINI_API_KEY")
     if api_key:
-        genai.configure(api_key=api_key)
-        os.environ["GOOGLE_API_KEY"] = api_key
+        os.environ.setdefault("GOOGLE_API_KEY", api_key)
     else:
         logger.warning("GEMINI_API_KEY not found in environment variables")
         GEMINI_AVAILABLE = False
 except ImportError:
-    logger.warning("google-generativeai package not installed")
+    logger.warning("google-genai package not installed")
     GEMINI_AVAILABLE = False
+
+_genai_client: Optional[Any] = None
+
+
+def _get_genai_client():
+    global _genai_client
+    if _genai_client is None and GEMINI_AVAILABLE:
+        key = os.environ.get("GEMINI_API_KEY")
+        if not key:
+            return None
+        _genai_client = genai.Client(api_key=key)
+    return _genai_client
+
 
 # System prompt with guardrails
 SYSTEM_PROMPT = """You are Avittam's professional support assistant — a helpful, knowledgeable AI chatbot for professionals seeking mentorship and career guidance.
@@ -116,6 +128,25 @@ Avittam is a professional mentorship platform connecting ambitious professionals
 
 Remember: You are a helpful guide to the platform, not a replacement for human mentors. Your goal is to help users navigate Avittam and connect them with the right resources."""
 
+_GEMINI_SAFETY_SETTINGS = [
+    types.SafetySetting(
+        category="HARM_CATEGORY_HARASSMENT",
+        threshold="BLOCK_MEDIUM_AND_ABOVE",
+    ),
+    types.SafetySetting(
+        category="HARM_CATEGORY_HATE_SPEECH",
+        threshold="BLOCK_MEDIUM_AND_ABOVE",
+    ),
+    types.SafetySetting(
+        category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
+        threshold="BLOCK_MEDIUM_AND_ABOVE",
+    ),
+    types.SafetySetting(
+        category="HARM_CATEGORY_DANGEROUS_CONTENT",
+        threshold="BLOCK_MEDIUM_AND_ABOVE",
+    ),
+]
+
 
 class ChatMessage(BaseModel):
     role: str = Field(..., pattern="^(user|bot|model)$")
@@ -138,78 +169,78 @@ async def chatbot_endpoint(request: ChatRequest):
     AI chatbot endpoint for Avittam platform assistance.
     Uses Gemini API with strict guardrails for safe, helpful responses.
     """
-    
+
     if not GEMINI_AVAILABLE:
         raise HTTPException(
             status_code=503,
-            detail="AI assistant is temporarily unavailable. Please try again later or contact support."
+            detail="AI assistant is temporarily unavailable. Please try again later or contact support.",
         )
-    
+
+    client = _get_genai_client()
+    if client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="AI assistant is temporarily unavailable. Please try again later or contact support.",
+        )
+
     try:
         # Input validation and sanitization
         user_message = request.message.strip()
         if not user_message:
             raise HTTPException(status_code=400, detail="Message cannot be empty")
-        
+
         # Limit history to last 20 messages to manage context size
         history = request.history[-20:] if request.history else []
-        
-        # Initialize Gemini model with safety settings
-        model = genai.GenerativeModel(
-            model_name='gemini-2.5-flash',
-            system_instruction=SYSTEM_PROMPT,
-            safety_settings={
-                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-            }
-        )
-        
-        # Convert history to Gemini format
+
         gemini_history = []
         for msg in history:
-            role = 'user' if msg.role == 'user' else 'model'
-            gemini_history.append({
-                'role': role,
-                'parts': [msg.content]
-            })
-        
-        # Start chat session and get response
-        chat_session = model.start_chat(history=gemini_history)
-        response = chat_session.send_message(user_message)
-        
-        # Extract response text
-        response_text = response.text.strip()
-        
+            role = "user" if msg.role == "user" else "model"
+            gemini_history.append(
+                types.Content(role=role, parts=[types.Part(text=msg.content)])
+            )
+
+        config = types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            safety_settings=_GEMINI_SAFETY_SETTINGS,
+        )
+
+        chat = client.aio.chats.create(
+            model="gemini-2.5-flash",
+            config=config,
+            history=gemini_history,
+        )
+
+        response = await chat.send_message(user_message)
+        response_text = (response.text or "").strip()
+
         # Additional output validation
         if not response_text:
             response_text = "I apologize, but I couldn't generate a proper response. Could you please rephrase your question?"
-        
+
         # Limit response length
         if len(response_text) > 1500:
             response_text = response_text[:1500] + "..."
-        
+
         logger.info(f"Chatbot response generated successfully for message: {user_message[:50]}...")
-        
+
         return ChatResponse(response=response_text, success=True)
-    
+
     except Exception as e:
         logger.error(f"Chatbot error: {str(e)}")
-        
+
         # Don't expose internal errors to users
         if "quota" in str(e).lower():
             raise HTTPException(
                 status_code=503,
-                detail="AI assistant is experiencing high demand. Please try again in a moment."
+                detail="AI assistant is experiencing high demand. Please try again in a moment.",
             )
         elif "safety" in str(e).lower():
             raise HTTPException(
                 status_code=400,
-                detail="I can only assist with career mentorship and platform-related questions. How can I help you with your professional development?"
+                detail="I can only assist with career mentorship and platform-related questions. How can I help you with your professional development?",
             )
         else:
             raise HTTPException(
                 status_code=500,
-                detail="An error occurred while processing your request. Please try again."
+                detail="An error occurred while processing your request. Please try again.",
             )

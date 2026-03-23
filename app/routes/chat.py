@@ -106,7 +106,7 @@ async def get_session_chat_status(session_id: str, user: User = Depends(get_curr
 async def create_session_chat_channel(session_id: str, user: User = Depends(get_current_user)):
     """
     Create or restore a chat channel for a booked session.
-    RESTRICTED TO MENTORS ONLY — mentees must unlock chat via
+    RESTRICTED TO PARTICIPANTS ONLY. Used for restoring already paid sessions.
     POST /api/chat/channels/{session_id}/pay-coins to prevent bypassing payment.
     """
     supabase = get_supabase_admin()
@@ -117,9 +117,9 @@ async def create_session_chat_channel(session_id: str, user: User = Depends(get_
         raise NotFoundError("Session not found")
     session = session_result.data[0]
 
-    # Only the mentor of this session may use this endpoint
-    if session["mentor_id"] != user.id:
-        raise BadRequestError("Only the mentor of this session can restore a chat channel via this endpoint.")
+    # Both mentor and mentee can restore the channel since the session already exists
+    if session["mentor_id"] != user.id and session["mentee_id"] != user.id:
+        raise BadRequestError("Only participants of this session can restore a chat channel via this endpoint.")
 
     # If channel already exists just return it (activate if inactive)
     existing = supabase.table("chat_channels").select("*").eq("session_id", session_id).execute()
