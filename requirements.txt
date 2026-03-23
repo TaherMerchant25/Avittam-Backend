@@ -14,9 +14,9 @@ passlib[bcrypt]==1.7.4
 razorpay==1.4.2
 
 # Google API
-google-api-python-client==2.114.0
-google-auth==2.26.2
-google-auth-oauthlib==1.2.0
+google-api-python-client>=2.114.0,<3
+google-auth>=2.47.0,<3
+google-auth-oauthlib>=1.2.0,<2
 google-genai>=1.0.0,<2
 
 # Validation & Serialization
