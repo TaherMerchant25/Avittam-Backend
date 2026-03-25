@@ -23,14 +23,22 @@ from app.middleware.error_handler import app_exception_handler, AppError
 
 # Known allowed origins (never rely solely on env var for CORS)
 _ALLOWED_ORIGINS = {
+    # Production domains
+    "https://avittam.com",
+    "https://www.avittam.com",
+    "https://mentor.avittam.com",
+    # Vercel deployments
     "https://avittam.vercel.app",
+    # Local development
     "http://localhost:3000",
     "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
 }
 # Also add whatever FRONTEND_URL is set to (strip trailing slash)
-_ALLOWED_ORIGINS.add(settings.frontend_url.rstrip("/"))
+_frontend = settings.frontend_url.rstrip("/")
+if _frontend:
+    _ALLOWED_ORIGINS.add(_frontend)
 
 
 def _is_allowed_origin(origin: str) -> bool:
@@ -39,6 +47,9 @@ def _is_allowed_origin(origin: str) -> bool:
         return True
     # Allow all Vercel preview deployments (avittam-git-*.vercel.app)
     if origin.endswith(".vercel.app"):
+        return True
+    # Allow avittam.com subdomains
+    if origin.endswith(".avittam.com"):
         return True
     return False
 

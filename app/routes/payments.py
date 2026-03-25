@@ -7,6 +7,8 @@ from fastapi import APIRouter, Depends, Query
 from typing import Optional
 import hmac
 import hashlib
+import httpx
+from datetime import datetime, timedelta
 
 from app.middleware.auth import get_current_user, get_optional_user
 from app.config.database import get_supabase_admin
@@ -38,28 +40,30 @@ async def create_registration_order(request: CreateRegistrationOrder):
     if not settings.razorpay_key_id or not settings.razorpay_key_secret:
         return {"success": False, "error": "Payment gateway not configured"}
 
-    import httpx
-    from datetime import datetime, timedelta
-
     # Create Razorpay order (amount already in paise)
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            "https://api.razorpay.com/v1/orders",
-            auth=(settings.razorpay_key_id, settings.razorpay_key_secret),
-            json={
-                "amount": request.amount,
-                "currency": "INR",
-                "notes": {
-                    "type": "mentee_registration",
-                    "email": request.email,
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                "https://api.razorpay.com/v1/orders",
+                auth=(settings.razorpay_key_id, settings.razorpay_key_secret),
+                json={
+                    "amount": request.amount,
+                    "currency": "INR",
+                    "notes": {
+                        "type": "mentee_registration",
+                        "email": request.email,
+                    },
                 },
-            },
-        )
+            )
+    except httpx.TimeoutException:
+        return {"success": False, "error": "Payment gateway timed out. Please try again."}
+    except httpx.RequestError as e:
+        return {"success": False, "error": f"Could not reach payment gateway: {str(e)}"}
 
-        if response.status_code != 200:
-            return {"success": False, "error": "Failed to create payment order"}
+    if response.status_code != 200:
+        return {"success": False, "error": "Failed to create payment order"}
 
-        order_data = response.json()
+    order_data = response.json()
 
     # Split name into first/last
     parts = request.name.strip().split(maxsplit=1)
@@ -123,8 +127,6 @@ async def verify_payment_any(
     if expected_signature != request.razorpay_signature:
         raise BadRequestError("Invalid payment signature")
 
-    from datetime import datetime
-
     supabase = get_supabase_admin()
 
     if user:
@@ -184,28 +186,31 @@ async def create_payment_order(
     if not settings.razorpay_key_id or not settings.razorpay_key_secret:
         raise BadRequestError("Payment gateway not configured")
     
-    import httpx
-    
     # Create Razorpay order
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            "https://api.razorpay.com/v1/orders",
-            auth=(settings.razorpay_key_id, settings.razorpay_key_secret),
-            json={
-                "amount": int(request.amount * 100),  # Amount in paise
-                "currency": request.currency,
-                "notes": {
-                    "user_id": user.id,
-                    "session_id": request.session_id,
-                    "description": request.description,
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                "https://api.razorpay.com/v1/orders",
+                auth=(settings.razorpay_key_id, settings.razorpay_key_secret),
+                json={
+                    "amount": int(request.amount * 100),  # Amount in paise
+                    "currency": request.currency,
+                    "notes": {
+                        "user_id": user.id,
+                        "session_id": request.session_id,
+                        "description": request.description,
+                    },
                 },
-            },
-        )
-        
-        if response.status_code != 200:
-            raise BadRequestError("Failed to create payment order")
-        
-        order_data = response.json()
+            )
+    except httpx.TimeoutException:
+        raise BadRequestError("Payment gateway timed out. Please try again.")
+    except httpx.RequestError as e:
+        raise BadRequestError(f"Could not reach payment gateway: {str(e)}")
+
+    if response.status_code != 200:
+        raise BadRequestError("Failed to create payment order")
+
+    order_data = response.json()
     
     # Store payment record
     supabase = get_supabase_admin()
@@ -313,8 +318,6 @@ async def request_refund(
         raise BadRequestError("Can only refund paid payments")
     
     # For now, just mark as refund requested (admin would process manually)
-    from datetime import datetime
-    
     update_result = supabase.table("payments").update({
         "metadata": {"refund_requested": True, "refund_reason": reason},
         "updated_at": datetime.now().isoformat(),
