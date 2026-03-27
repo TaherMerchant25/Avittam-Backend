@@ -61,7 +61,7 @@ async def create_session(
     start_time = input_data.scheduled_at
     end_time = start_time + timedelta(minutes=duration)
     
-    # Create session in database (Zoom meeting is created separately via /api/zoom/schedule-session)
+    # Create session in database (Jitsi Meet URL is generated separately via /api/sessions/schedule)
     session_data = {
         "mentor_id": input_data.mentor_id,
         "mentee_id": input_data.mentee_id,

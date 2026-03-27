@@ -31,15 +31,6 @@ class Settings(BaseSettings):
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
     jwt_expiration_hours: int = Field(default=24, alias="JWT_EXPIRATION_HOURS")
     
-    # Zoom OAuth Configuration
-    zoom_client_id: Optional[str] = Field(default=None, alias="ZOOM_CLIENT_ID")
-    zoom_client_secret: Optional[str] = Field(default=None, alias="ZOOM_CLIENT_SECRET")
-    zoom_secret_token: Optional[str] = Field(default=None, alias="ZOOM_SECRET_TOKEN")
-    zoom_redirect_uri: str = Field(
-        default="https://avittam-backend-yr1z.onrender.com/api/zoom/auth/callback",
-        alias="ZOOM_REDIRECT_URI"
-    )
-    
     # Rate Limiting
     rate_limit_per_minute: int = Field(default=60, alias="RATE_LIMIT_PER_MINUTE")
     

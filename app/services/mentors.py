@@ -199,38 +199,91 @@ async def unlock_request(request_id: str, mentor_id: str) -> Dict[str, Any]:
 
 
 async def accept_request(request_id: str, mentor_id: str) -> Dict[str, Any]:
-    """Accept a request"""
+    """
+    Accept a request. Automatically creates a session placeholder and
+    unlocks a chat channel so mentor and mentee can discuss immediately.
+    """
     supabase = get_supabase_admin()
-    
+
     result = supabase.table("mentor_requests").select("*").eq("id", request_id).single().execute()
-    
+
     if not result.data:
         raise NotFoundError("Request not found")
-    
+
     request = result.data
-    
+    mentee_id = request["mentee_id"]
+
+
     # Check if mentor has the lock
     if request.get("locked_by") != mentor_id:
         raise ForbiddenError("You must lock the request before accepting")
-    
+
     update_result = supabase.table("mentor_requests").update({
         "status": RequestStatus.ACCEPTED.value,
         "accepted_by": mentor_id,
         "accepted_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
     }).eq("id", request_id).execute()
-    
-    # Notify the mentee
+
+    # ── Create a session placeholder so chat can be attached immediately ──
+    session_id: Optional[str] = None
+    try:
+        import uuid as _uuid
+        session_id = str(_uuid.uuid4())
+        supabase.table("sessions").insert({
+            "id": session_id,
+            "mentor_id": mentor_id,
+            "mentee_id": mentee_id,
+            "request_id": request_id,
+            "status": "accepted",
+            "duration_minutes": request.get("duration_minutes") or 60,
+            # placeholder — will be updated when mentor formally schedules
+            "scheduled_at": (datetime.now() + timedelta(days=7)).isoformat(),
+        }).execute()
+        logger.info(f"✅ Session placeholder created: {session_id}")
+    except Exception as sess_err:
+        logger.warning(f"Session placeholder creation failed (non-fatal): {sess_err}")
+
+    # ── Auto-create chat channel so both parties can talk immediately ─────
+    if session_id:
+        try:
+            from app.services import stream_chat as _sc
+            if _sc.is_stream_chat_configured():
+                mentor_info = supabase.table("users").select("name, avatar_url").eq("id", mentor_id).single().execute()
+                mentee_info = supabase.table("users").select("name, avatar_url").eq("id", mentee_id).single().execute()
+                m_data = mentor_info.data or {}
+                s_data = mentee_info.data or {}
+
+                _sc.ensure_system_user()
+                _sc.upsert_stream_user(mentor_id, m_data.get("name", "Mentor"), m_data.get("avatar_url"), "mentor")
+                _sc.upsert_stream_user(mentee_id, s_data.get("name", "Student"), s_data.get("avatar_url"), "mentee")
+
+                topic = request.get("topic") or request.get("title") or "Mentorship Session"
+                stream_channel_id = _sc.create_session_channel(session_id, mentor_id, mentee_id, topic)
+                _sc.activate_channel(stream_channel_id)
+
+                supabase.table("chat_channels").insert({
+                    "session_id": session_id,
+                    "mentor_id": mentor_id,
+                    "mentee_id": mentee_id,
+                    "stream_channel_id": stream_channel_id,
+                    "is_active": True,
+                }).execute()
+                logger.info(f"✅ Chat channel auto-created for session {session_id}")
+        except Exception as chat_err:
+            logger.warning(f"Chat channel creation failed (non-fatal): {chat_err}")
+
+    # ── Notify the mentee ─────────────────────────────────────────────────
     await create_notification({
-        "user_id": request["mentee_id"],
+        "user_id": mentee_id,
         "type": "request",
-        "title": "🎉 Request Accepted!",
-        "message": "A mentor has accepted your request. You can now schedule a session.",
+        "title": "🎉 Mentor Accepted Your Request!",
+        "message": "A mentor accepted your request. You can now chat and discuss your session.",
         "related_entity_type": "mentor_request",
         "related_entity_id": request_id,
-        "action_url": f"/requests/{request_id}",
+        "action_url": "/sessions",
     })
-    
+
     return update_result.data[0]
 
 

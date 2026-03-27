@@ -18,7 +18,7 @@ from loguru import logger
 import sys
 
 from app.config.settings import settings
-from app.routes import sessions, mentors, zoom, notifications, payments, wallets, admin, chat, chatbot
+from app.routes import sessions, mentors, notifications, payments, wallets, admin, chat, chatbot
 from app.middleware.error_handler import app_exception_handler, AppError
 
 # Known allowed origins (never rely solely on env var for CORS)
@@ -89,7 +89,7 @@ async def lifespan(app: FastAPI):
 # Create FastAPI application
 app = FastAPI(
     title="MentorGold API",
-    description="Backend API for MentorGold - Session booking, Zoom integration, and mentor management",
+    description="Backend API for MentorGold - Session booking and mentor management",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -215,7 +215,6 @@ async def health_check():
 # Mount route modules
 app.include_router(sessions.router, prefix="/api/sessions", tags=["Sessions"])
 app.include_router(mentors.router, prefix="/api/mentors", tags=["Mentors"])
-app.include_router(zoom.router, prefix="/api/zoom", tags=["Zoom"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["Notifications"])
 app.include_router(payments.router, prefix="/api/payments", tags=["Payments"])
 app.include_router(wallets.router, prefix="/api/wallets", tags=["Wallets"])

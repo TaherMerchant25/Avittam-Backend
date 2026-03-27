@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from app.middleware.auth import get_current_user, require_mentee
 from app.config.database import get_supabase_admin
 from app.config.settings import settings
+from app.services.jitsi import generate_meeting_url
 from app.models.schemas import (
     User,
     CreateSessionRequest,
@@ -367,6 +368,117 @@ async def add_notes(
         "success": True,
         "data": session,
         "message": "Notes added successfully",
+    }
+
+
+# =====================================================
+# SCHEDULE SESSION WITH JITSI (replaces Zoom endpoint)
+# =====================================================
+
+class ScheduleSessionBody(BaseModel):
+    request_id: str
+    start_time: str  # ISO 8601
+    duration_minutes: int = 60
+    notes: Optional[str] = None
+
+
+@router.post("/schedule", response_model=ApiResponse)
+async def schedule_session(
+    body: ScheduleSessionBody,
+    user: User = Depends(get_current_user),
+):
+    """
+    Mentor schedules a session for an accepted request.
+    Generates a Jitsi Meet link automatically — no Zoom account needed.
+    """
+    if user.role.value != "mentor":
+        raise BadRequestError("Only mentors can schedule sessions")
+
+    supabase = get_supabase_admin()
+
+    req_res = supabase.table("mentor_requests").select(
+        "id, status, mentee_id, accepted_by, topic, title"
+    ).eq("id", body.request_id).single().execute()
+
+    if not req_res.data:
+        raise NotFoundError("Request not found")
+
+    req = req_res.data
+    if req["accepted_by"] != user.id:
+        raise BadRequestError("You are not the accepted mentor for this request")
+    if req["status"] not in ("accepted", "paid"):
+        raise BadRequestError(
+            f"Request must be accepted before scheduling (current: {req['status']})"
+        )
+
+    # Reuse the placeholder session created on mentor-accept (if it exists)
+    existing_sess = supabase.table("sessions").select("id").eq(
+        "request_id", body.request_id
+    ).execute()
+
+    import uuid as _uuid
+    if existing_sess.data:
+        session_id = existing_sess.data[0]["id"]
+        meeting_url = generate_meeting_url(session_id)
+        update_payload: dict = {
+            "scheduled_at": body.start_time,
+            "duration_minutes": body.duration_minutes,
+            "status": "scheduled",
+            "meeting_url": meeting_url,
+        }
+        if body.notes:
+            update_payload["mentor_notes"] = body.notes
+        sess_res = supabase.table("sessions").update(update_payload).eq("id", session_id).execute()
+    else:
+        session_id = str(_uuid.uuid4())
+        meeting_url = generate_meeting_url(session_id)
+        session_insert: dict = {
+            "id": session_id,
+            "mentor_id": user.id,
+            "mentee_id": req["mentee_id"],
+            "request_id": body.request_id,
+            "scheduled_at": body.start_time,
+            "duration_minutes": body.duration_minutes,
+            "status": "scheduled",
+            "meeting_url": meeting_url,
+        }
+        if body.notes:
+            session_insert["mentor_notes"] = body.notes
+        sess_res = supabase.table("sessions").insert(session_insert).execute()
+
+    if not sess_res.data:
+        raise BadRequestError("Failed to update/create session record")
+
+    session = sess_res.data[0]
+
+    # Notify mentee
+    mentor_res = supabase.table("users").select("name").eq("id", user.id).single().execute()
+    mentor_name = (mentor_res.data or {}).get("name", "Your mentor")
+    try:
+        supabase.table("notifications").insert({
+            "user_id": req["mentee_id"],
+            "type": "session",
+            "title": "Session Scheduled! 🎉",
+            "message": (
+                f"{mentor_name} has scheduled your session on "
+                f"{body.start_time[:10]}. A Jitsi Meet link is ready."
+            ),
+            "related_entity_type": "session",
+            "related_entity_id": session["id"],
+            "action_url": "/sessions",
+        }).execute()
+    except Exception as notif_err:
+        from loguru import logger as _log
+        _log.warning(f"Notification insert failed: {notif_err}")
+
+    return {
+        "success": True,
+        "message": "Session scheduled with Jitsi Meet link",
+        "data": {
+            "session_id": session["id"],
+            "meeting_url": meeting_url,
+            "scheduled_at": body.start_time,
+        },
     }
 
 
