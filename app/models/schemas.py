@@ -197,6 +197,10 @@ class CreateMentorRequestInput(BaseModel):
     topic: str = Field(..., min_length=2, max_length=100)
     mentorship_type: MentorshipType
     plan_id: Optional[str] = None
+    selected_program_id: Optional[str] = None
+    selected_program_name: Optional[str] = None
+    selected_program_term: Optional[str] = None
+    selected_program_price_coins: Optional[float] = Field(default=None, ge=0)
     bounty: Optional[float] = Field(default=None, ge=0)
     preferred_date: Optional[datetime] = None
     duration_minutes: int = Field(default=60, ge=15, le=180)
@@ -215,6 +219,10 @@ class MentorRequest(BaseModel):
     topic: str
     mentorship_type: MentorshipType
     plan_id: Optional[str] = None
+    selected_program_id: Optional[str] = None
+    selected_program_name: Optional[str] = None
+    selected_program_term: Optional[str] = None
+    selected_program_price_coins: Optional[float] = None
     bounty: Optional[float] = None
     preferred_date: Optional[datetime] = None
     duration_minutes: int = 60
@@ -553,7 +561,7 @@ class SessionCoinPayment(BaseModel):
 
 class SubmitNPSRating(BaseModel):
     session_id: str
-    score: int = Field(..., ge=0, le=10, description="NPS score 0-10")
+    score: int = Field(..., ge=1, le=5, description="Star score 1-5")
     feedback: Optional[str] = None
 
 

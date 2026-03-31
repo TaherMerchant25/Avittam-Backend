@@ -417,11 +417,13 @@ async def rate_session_nps(
     user: User = Depends(get_current_user),
 ):
     """
-    Submit NPS rating (0-10) for a completed session.
-    Platform fee:
-      9-10 → 20% (mentor gets 80%)
-      6-8  → 40% (mentor gets 60%)
-      0-5  → 60% (mentor gets 40%)
+    Submit star rating (1-5) for a completed session.
+    Platform fee is derived from resulting mentor rating band:
+      5 → 20% (mentor gets 80%)
+      4 → 30% (mentor gets 70%)
+      3 → 50% (mentor gets 50%)
+      2 → 70% (mentor gets 30%)
+      1 → 80% (mentor gets 20%)
     """
     # Get session to find the mentor
     from app.config.database import get_supabase_admin

@@ -123,11 +123,12 @@ def _cors_headers(origin: str) -> dict:
 @app.middleware("http")
 async def cors_middleware(request: Request, call_next):
     origin = request.headers.get("origin", "")
+    allowed = _is_allowed_origin(origin)
 
     # Handle preflight immediately
     if request.method == "OPTIONS":
         resp = Response(status_code=200)
-        if _is_allowed_origin(origin):
+        if allowed:
             for k, v in _cors_headers(origin).items():
                 resp.headers[k] = v
         return resp
@@ -135,7 +136,7 @@ async def cors_middleware(request: Request, call_next):
     response = await call_next(request)
 
     # Inject CORS headers into every response from an allowed origin
-    if _is_allowed_origin(origin):
+    if allowed:
         for k, v in _cors_headers(origin).items():
             response.headers[k] = v
     elif origin:
