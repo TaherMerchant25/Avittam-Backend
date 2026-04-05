@@ -465,7 +465,7 @@ async def schedule_session(
             ),
             "related_entity_type": "session",
             "related_entity_id": session["id"],
-            "action_url": "/sessions",
+            "action_url": "/#meet",
         }).execute()
     except Exception as notif_err:
         from loguru import logger as _log

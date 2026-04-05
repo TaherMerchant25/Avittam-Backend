@@ -42,13 +42,18 @@ RATING_BONUS = {
 
 
 def get_nps_band(score: int) -> str:
-    """Derive NPS band from score"""
+    """Derive NPS band from score (1–5 stars or legacy 0–10 NPS)."""
+    if 1 <= score <= 5:
+        if score == 5:
+            return "promoter"
+        if score in (3, 4):
+            return "passive"
+        return "detractor"
     if score >= 9:
         return "promoter"
-    elif score >= 6:
+    if score >= 6:
         return "passive"
-    else:
-        return "detractor"
+    return "detractor"
 
 
 def get_platform_fee_pct(rating: float) -> float:
@@ -579,7 +584,7 @@ def submit_nps_rating(
     - Rating 1: -30% → Mentor gets 20%, Platform 80%
     """
     supabase = get_supabase_admin()
-    
+
     # Validate score (1-5 instead of 0-10)
     if score < 1 or score > 5:
         raise BadRequestError("Rating must be 1-5")
@@ -595,13 +600,18 @@ def submit_nps_rating(
     if existing.data:
         raise BadRequestError("You have already rated this session")
     
-    # Get mentor's current average rating
+    # Get mentor's current average rating (avoid .single() — PGRST116 → 500)
     mentor_result = supabase.table("users").select("rating, sessions_completed").eq(
         "id", rated_mentor_id
-    ).single().execute()
-    
-    current_rating = float(mentor_result.data.get("rating", 3.0) or 3.0)
-    sessions_count = int(mentor_result.data.get("sessions_completed", 0) or 0)
+    ).limit(1).execute()
+    mentor_rows = mentor_result.data or []
+
+    if not mentor_rows:
+        raise NotFoundError("Mentor not found for this session")
+
+    mrow = mentor_rows[0]
+    current_rating = float(mrow.get("rating", 3.0) or 3.0)
+    sessions_count = int(mrow.get("sessions_completed", 0) or 0)
     
     # Calculate new average rating
     new_rating = ((current_rating * sessions_count) + score) / (sessions_count + 1)
@@ -615,17 +625,22 @@ def submit_nps_rating(
         "sessions_completed": sessions_count + 1
     }).eq("id", rated_mentor_id).execute()
     
-    # Insert rating record
+    # Insert rating record (band must be nps_band enum: promoter | passive | detractor)
     nps_data = {
         "session_id": session_id,
         "rater_id": rater_id,
         "rated_mentor_id": rated_mentor_id,
         "score": score,
-        "band": "rating",
+        "band": band,
         "platform_fee_pct": fee_pct,
         "feedback": feedback,
     }
+
     nps_result = supabase.table("nps_ratings").insert(nps_data).execute()
+
+    if not nps_result.data:
+        raise BadRequestError("Could not save rating; try again.")
+
     nps_id = nps_result.data[0]["id"]
     
     # Settle the session coin payment
