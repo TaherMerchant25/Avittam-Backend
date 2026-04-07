@@ -202,8 +202,9 @@ async def root():
     }
 
 
-# Health check
+# Health check (/health for load balancers & cron-job.org; /api/health for API consistency)
 @app.get("/api/health", tags=["Health"])
+@app.get("/health", tags=["Health"])
 async def health_check():
     return {
         "success": True,

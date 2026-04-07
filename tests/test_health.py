@@ -17,12 +17,21 @@ def test_health_check(client):
     """Test health check endpoint"""
     response = client.get("/api/health")
     assert response.status_code == 200
-    
+
     data = response.json()
     assert data["success"] is True
     assert data["message"] == "MentorGold API is running"
     assert "timestamp" in data
-    assert data["version"] == "1.0.0"
+    assert data["version"] == "1.1.0"
+
+
+def test_health_check_root_path(client):
+    """GET /health matches /api/health (cron, probes)"""
+    response = client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert data["message"] == "MentorGold API is running"
 
 
 def test_not_found(client):
