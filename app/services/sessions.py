@@ -16,6 +16,7 @@ from app.models.schemas import (
     SessionFilters,
 )
 from app.middleware.error_handler import NotFoundError, BadRequestError, ConflictError
+from app.utils.helpers import validate_uuid
 
 
 async def create_session(
@@ -146,7 +147,8 @@ async def get_user_sessions(
     elif filters.role == "mentee":
         query = query.eq("mentee_id", user_id)
     else:
-        query = query.or_(f"mentor_id.eq.{user_id},mentee_id.eq.{user_id}")
+        safe_id = validate_uuid(user_id, "user_id")
+        query = query.or_(f"mentor_id.eq.{safe_id},mentee_id.eq.{safe_id}")
     
     # Filter by status
     if filters.status:

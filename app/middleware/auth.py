@@ -10,7 +10,7 @@ from jose.backends import ECKey
 from typing import Optional
 from loguru import logger
 import httpx
-from functools import lru_cache
+import time
 
 from app.config.settings import settings
 from app.config.database import get_supabase_admin
@@ -20,18 +20,26 @@ from app.middleware.error_handler import UnauthorizedError
 
 security = HTTPBearer()
 
+_jwks_cache: dict = {"data": None, "fetched_at": 0.0}
+_JWKS_TTL = 3600.0  # refresh every hour (handles Supabase key rotation)
 
-@lru_cache(maxsize=1)
+
 def get_jwks():
-    """Fetch JWKS from Supabase (cached)"""
+    """Fetch JWKS from Supabase (TTL-cached; refreshes every hour)."""
+    now = time.monotonic()
+    if _jwks_cache["data"] is not None and now - _jwks_cache["fetched_at"] < _JWKS_TTL:
+        return _jwks_cache["data"]
+
     jwks_url = f"{settings.supabase_url}/auth/v1/.well-known/jwks.json"
     try:
         response = httpx.get(jwks_url, timeout=10.0)
         response.raise_for_status()
-        return response.json()
+        _jwks_cache["data"] = response.json()
+        _jwks_cache["fetched_at"] = now
+        return _jwks_cache["data"]
     except Exception as e:
         logger.error(f"Failed to fetch JWKS: {e}")
-        return None
+        return _jwks_cache["data"]  # serve stale data rather than break auth
 
 
 async def verify_token(token: str) -> Optional[dict]:

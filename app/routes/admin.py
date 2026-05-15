@@ -7,6 +7,7 @@ from app.models.schemas import User, ApiResponse
 from app.services import admin as admin_service
 from app.config.database import get_supabase_admin
 from app.middleware.error_handler import BadRequestError, NotFoundError
+from app.utils.helpers import sanitize_filter_search
 from loguru import logger
 from pydantic import BaseModel
 
@@ -88,8 +89,8 @@ async def list_all_users(
     ).order("name")
 
     if search:
-        # Supabase ilike filter — search name OR email
-        query = query.or_(f"name.ilike.%{search}%,email.ilike.%{search}%")
+        safe = sanitize_filter_search(search)
+        query = query.or_(f"name.ilike.%{safe}%,email.ilike.%{safe}%")
 
     result = query.limit(200).execute()
     users = result.data or []

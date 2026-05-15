@@ -6,6 +6,34 @@
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 import math
+import re
+
+# ---------------------------------------------------------------------------
+# PostgREST injection guards
+# .or_() takes a raw filter string — these helpers make it safe to interpolate.
+# ---------------------------------------------------------------------------
+
+_UUID_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    re.IGNORECASE,
+)
+# Characters with special meaning in PostgREST filter expressions
+_POSTGREST_META = re.compile(r"[,()'\"\\;\x00\n\r]")
+
+
+def validate_uuid(value: str, field_name: str = "id") -> str:
+    """Raise ValueError if value is not a valid UUID, else return it unchanged."""
+    if not _UUID_RE.match(value):
+        raise ValueError(f"Invalid {field_name}: expected UUID format")
+    return value
+
+
+def sanitize_filter_search(value: str, max_length: int = 100) -> str:
+    """
+    Strip PostgREST filter metacharacters from a free-text search term so it
+    is safe to interpolate into .or_(f"col.ilike.%{sanitize_filter_search(s)}%").
+    """
+    return _POSTGREST_META.sub("", value)[:max_length]
 
 
 def paginate(

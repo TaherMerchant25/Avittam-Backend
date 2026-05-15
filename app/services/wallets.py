@@ -134,41 +134,12 @@ def get_wallet_transactions(
 
 
 async def _get_referral_chain(supabase, referral_code: str) -> List[Dict[str, Any]]:
-    """
-    Get the referral chain (upline) for a given referral code.
-    Returns list of mentors from direct referrer up to the top.
-    """
-    chain = []
-    current_code = referral_code.upper()
-    max_depth = 50  # Safety limit to prevent infinite loops
-    
-    for _ in range(max_depth):
-        # Find mentor with this code
-        result = supabase.table("users").select(
-            "id, name, email, referral_code, referred_by"
-        ).eq("referral_code", current_code).eq("role", "mentor").execute()
-        
-        if not result.data:
-            break
-        
-        mentor = result.data[0]
-        chain.append(mentor)
-        
-        # Move up the chain
-        if not mentor.get("referred_by"):
-            break
-        
-        # Get the referral code of the person who referred this mentor
-        parent_result = supabase.table("users").select(
-            "referral_code"
-        ).eq("id", mentor["referred_by"]).execute()
-        
-        if not parent_result.data:
-            break
-        
-        current_code = parent_result.data[0]["referral_code"]
-    
-    return chain
+    """Get referral chain via single recursive CTE (migration 040)."""
+    result = supabase.rpc(
+        "get_referral_chain",
+        {"p_referral_code": referral_code.upper()},
+    ).execute()
+    return result.data or []
 
 
 def get_mentor_wallet_overview(user_id: str) -> Dict[str, Any]:
@@ -365,34 +336,28 @@ def pay_for_session_with_coins(
     Otherwise the mentor payout happens AFTER session + NPS rating.
     """
     supabase = get_supabase_admin()
-    
-    # Get student wallet
+
+    # Ensure wallet exists before calling atomic RPC
     wallet = get_or_create_wallet(mentee_id, "student")
-    balance = float(wallet["balance"])
-    
-    if balance < total_coins:
-        raise BadRequestError(
-            f"Insufficient Avittam Coins. Balance: {balance}, Required: {total_coins}"
-        )
-    
-    # Debit student wallet
-    new_balance = balance - total_coins
-    supabase.table("wallets").update({
-        "balance": new_balance,
-        "total_debited": float(wallet["total_debited"]) + total_coins,
-    }).eq("id", wallet["id"]).execute()
-    
-    # Record debit transaction
-    supabase.table("wallet_transactions").insert({
-        "wallet_id": wallet["id"],
-        "tx_type": "debit",
-        "category": "session_payment",
-        "amount": total_coins,
-        "balance_after": new_balance,
-        "session_id": session_id,
-        "related_user_id": mentor_id,
-        "description": f"Paid {total_coins} Avittam Coins for session",
+
+    # Atomic debit via DB function — row-level lock prevents double-spend
+    debit_result = supabase.rpc("atomic_debit_wallet", {
+        "p_wallet_id": wallet["id"],
+        "p_amount": total_coins,
+        "p_session_id": session_id,
+        "p_related_user_id": mentor_id,
+        "p_description": f"Paid {total_coins} Avittam Coins for session",
     }).execute()
+
+    if not debit_result.data or not debit_result.data[0]["success"]:
+        error_msg = (
+            debit_result.data[0]["error_message"]
+            if debit_result.data
+            else "Failed to debit wallet"
+        )
+        raise BadRequestError(error_msg)
+
+    new_balance = float(debit_result.data[0]["new_balance"])
     
     if settle_immediately:
         # Credit mentor immediately using their current rating
