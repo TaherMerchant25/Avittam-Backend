@@ -173,6 +173,22 @@ async def get_user_sessions(
     }
 
 
+def _delete_session_resources(supabase, mentor_id: str, mentee_id: str) -> None:
+    """Delete all mentor_resources for this mentor/student pair from storage + DB."""
+    try:
+        rows = supabase.table("mentor_resources").select("id, file_path") \
+            .eq("mentor_id", mentor_id).eq("student_id", mentee_id).execute()
+        if not rows.data:
+            return
+        paths = [r["file_path"] for r in rows.data]
+        ids   = [r["id"] for r in rows.data]
+        supabase.storage.from_("mentor-resources").remove(paths)
+        supabase.table("mentor_resources").delete().in_("id", ids).execute()
+        logger.info(f"[Resources] Deleted {len(ids)} resource(s) for mentor={mentor_id} student={mentee_id}")
+    except Exception as exc:
+        logger.warning(f"[Resources] Cleanup failed for mentor={mentor_id} student={mentee_id}: {exc}")
+
+
 async def update_session_status(
     session_id: str,
     status: SessionStatus,
@@ -193,12 +209,15 @@ async def update_session_status(
         update_data["started_at"] = datetime.now().isoformat()
     elif status == SessionStatus.COMPLETED:
         update_data["ended_at"] = datetime.now().isoformat()
-    
+
     result = supabase.table("sessions").update(update_data).eq("id", session_id).execute()
-    
+
     if not result.data:
         raise Exception("Failed to update session")
-    
+
+    if status == SessionStatus.COMPLETED:
+        _delete_session_resources(supabase, session["mentor_id"], session["mentee_id"])
+
     return result.data[0]
 
 

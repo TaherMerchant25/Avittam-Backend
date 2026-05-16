@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 from fastapi import APIRouter, Depends, Query, Body
@@ -5,14 +6,24 @@ from fastapi import APIRouter, Depends, Query, Body
 from app.middleware.auth import require_admin
 from app.models.schemas import User, ApiResponse
 from app.services import admin as admin_service
+from app.services import wallets as wallets_service
 from app.config.database import get_supabase_admin
 from app.middleware.error_handler import BadRequestError, NotFoundError
 from app.utils.helpers import sanitize_filter_search
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 router = APIRouter()
+
+
+class FeeSettingsRequest(BaseModel):
+    base_pay_pct:   float = Field(..., ge=0, le=100)
+    rating_5_bonus: float = Field(..., ge=-100, le=100)
+    rating_4_bonus: float = Field(..., ge=-100, le=100)
+    rating_3_bonus: float = Field(..., ge=-100, le=100)
+    rating_2_bonus: float = Field(..., ge=-100, le=100)
+    rating_1_bonus: float = Field(..., ge=-100, le=100)
 
 
 class CoinAdjustRequest(BaseModel):
@@ -229,3 +240,26 @@ async def admin_adjust_coins(
         },
         message=f"Coins updated: {old_balance} → {new_balance}",
     )
+
+
+# ─── Platform Fee Settings ────────────────────────────────────────────────────
+
+@router.get("/fee-settings", response_model=ApiResponse)
+async def get_fee_settings(_: User = Depends(require_admin)):
+    data = wallets_service.get_fee_settings()
+    return ApiResponse(success=True, data=data)
+
+
+@router.put("/fee-settings", response_model=ApiResponse)
+async def update_fee_settings(
+    body: FeeSettingsRequest,
+    admin_user: User = Depends(require_admin),
+):
+    supabase = get_supabase_admin()
+    updates = body.model_dump()
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    result = supabase.table("platform_fee_settings").upsert({"id": 1, **updates}).execute()
+    wallets_service.invalidate_fee_settings_cache()
+    saved = result.data[0] if result.data else updates
+    logger.info(f"[Admin] Fee settings updated by {admin_user.email}: {updates}")
+    return ApiResponse(success=True, data=saved, message="Fee settings saved")

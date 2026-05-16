@@ -29,7 +29,7 @@ from app.models.schemas import (
 from app.services import sessions as session_service
 from app.services import session_booking as booking_service
 from app.services.wallets import credit_mentor_for_session_payment
-from app.middleware.error_handler import BadRequestError, NotFoundError
+from app.middleware.error_handler import BadRequestError, NotFoundError, ForbiddenError
 
 
 router = APIRouter()
@@ -494,3 +494,34 @@ async def get_upcoming_sessions(
         "success": True,
         "data": sessions,
     }
+
+
+# ─── Mentor Resources — signed download URL ──────────────────────────────────
+
+@router.get("/resources/{resource_id}/download", response_model=ApiResponse)
+async def get_resource_download_url(
+    resource_id: str,
+    user: User = Depends(get_current_user),
+):
+    """Generate a 5-min signed download URL for a mentor_resources file.
+    Only the student the file was shared with can call this."""
+    supabase = get_supabase_admin()
+
+    row = supabase.table("mentor_resources").select(
+        "id, file_path, student_id, mentor_id, name"
+    ).eq("id", resource_id).single().execute()
+
+    if not row.data:
+        raise NotFoundError("Resource not found")
+
+    resource = row.data
+    if resource["student_id"] != user.id and resource["mentor_id"] != user.id:
+        raise ForbiddenError("Access denied")
+
+    signed = supabase.storage.from_("mentor-resources").create_signed_url(
+        resource["file_path"], 300
+    )
+    if not signed or not signed.get("signedURL"):
+        raise Exception("Could not generate download link")
+
+    return ApiResponse(success=True, data={"url": signed["signedURL"], "name": resource["name"]})

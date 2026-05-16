@@ -4,6 +4,7 @@
 # and referral commissions
 # =====================================================
 
+import time
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 from loguru import logger
@@ -41,6 +42,43 @@ RATING_BONUS = {
 }
 
 
+# ── DB-backed fee settings cache ─────────────────────────────────────────────
+_fee_settings_cache: Dict[str, Any] = {}
+_fee_settings_ts: float = 0.0
+_FEE_SETTINGS_TTL = 60.0  # re-fetch from DB at most once per minute
+
+
+def get_fee_settings() -> Dict[str, Any]:
+    """Return fee settings from DB (cached 60 s). Falls back to hardcoded constants."""
+    global _fee_settings_cache, _fee_settings_ts
+    now = time.time()
+    if _fee_settings_cache and (now - _fee_settings_ts) < _FEE_SETTINGS_TTL:
+        return _fee_settings_cache
+    try:
+        sb = get_supabase_admin()
+        result = sb.table("platform_fee_settings").select("*").eq("id", 1).single().execute()
+        if result.data:
+            _fee_settings_cache = result.data
+            _fee_settings_ts = now
+            return _fee_settings_cache
+    except Exception as e:
+        logger.warning(f"Could not load platform_fee_settings from DB: {e}")
+    # Fallback to module-level constants
+    return {
+        "base_pay_pct": BASE_PAY_PCT,
+        "rating_5_bonus": RATING_BONUS[5],
+        "rating_4_bonus": RATING_BONUS[4],
+        "rating_3_bonus": RATING_BONUS[3],
+        "rating_2_bonus": RATING_BONUS[2],
+        "rating_1_bonus": RATING_BONUS[1],
+    }
+
+
+def invalidate_fee_settings_cache() -> None:
+    global _fee_settings_ts
+    _fee_settings_ts = 0.0
+
+
 def get_nps_band(score: int) -> str:
     """Derive NPS band from score (1–5 stars or legacy 0–10 NPS)."""
     if 1 <= score <= 5:
@@ -58,28 +96,22 @@ def get_nps_band(score: int) -> str:
 
 def get_platform_fee_pct(rating: float) -> float:
     """
-    Rating-based mentor earning calculation:
-    - Base pay: 50% of session amount
-    - Bonus/Penalty based on rating (rounded to nearest integer):
-      * Rating 5: +30% → Total 80%
-      * Rating 4: +20% → Total 70%
-      * Rating 3: +0%  → Total 50%
-      * Rating 2: -20% → Total 30%
-      * Rating 1: -30% → Total 20%
-    
-    Returns platform fee percentage (100% - mentor_earning%)
+    Rating-based mentor earning calculation using admin-configurable DB settings.
+    Falls back to hardcoded constants if DB is unavailable.
+    Returns platform fee percentage (100% - mentor_earning%).
     """
-    rating_int = round(rating)
-    if rating_int < 1:
-        rating_int = 1
-    elif rating_int > 5:
-        rating_int = 5
-    
-    bonus = RATING_BONUS.get(rating_int, 0)
-    mentor_earning_pct = BASE_PAY_PCT + bonus
-    platform_fee_pct = 100.0 - mentor_earning_pct
-    
-    return platform_fee_pct
+    s = get_fee_settings()
+    base_pay = float(s.get("base_pay_pct", BASE_PAY_PCT))
+    bonus_map = {
+        5: float(s.get("rating_5_bonus", RATING_BONUS[5])),
+        4: float(s.get("rating_4_bonus", RATING_BONUS[4])),
+        3: float(s.get("rating_3_bonus", RATING_BONUS[3])),
+        2: float(s.get("rating_2_bonus", RATING_BONUS[2])),
+        1: float(s.get("rating_1_bonus", RATING_BONUS[1])),
+    }
+    rating_int = max(1, min(5, round(rating)))
+    mentor_earning_pct = base_pay + bonus_map.get(rating_int, 0)
+    return 100.0 - mentor_earning_pct
 
 
 # =====================================================
