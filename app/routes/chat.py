@@ -29,9 +29,12 @@ async def get_token(user: User = Depends(get_current_user)):
     """Get Stream Chat user token"""
     if not stream_chat_service.is_stream_chat_configured():
         raise BadRequestError("Stream Chat not configured")
-    stream_chat_service.upsert_stream_user(
-        user.id, user.name or user.email, user.avatar_url, user.role.value
-    )
+    try:
+        stream_chat_service.upsert_stream_user(
+            user.id, user.name or user.email, user.avatar_url, user.role.value
+        )
+    except Exception as e:
+        logger.warning(f"[Chat] upsert_stream_user failed (non-fatal): {e}")
     token = stream_chat_service.generate_user_token(user.id)
     return {
         "success": True,
