@@ -26,6 +26,13 @@ class FeeSettingsRequest(BaseModel):
     rating_1_bonus: float = Field(..., ge=-100, le=100)
 
 
+class PlatformSettingsRequest(BaseModel):
+    mentor_registration_fee:      float = Field(..., ge=0)
+    mentee_registration_fee:      float = Field(..., ge=0)
+    referral_milestone_threshold: float = Field(..., ge=1)
+    referral_milestone_reward_pct: float = Field(..., ge=0, le=100)
+
+
 class CoinAdjustRequest(BaseModel):
     user_id: str
     action: str          # "set" | "add" | "deduct"
@@ -221,6 +228,14 @@ async def admin_adjust_coins(
             },
         }).execute()
 
+    # Check referral milestone when admin credits a mentor's wallet
+    if txn_type == "admin_credit" and target_user.get("role") == "mentor" and txn_amount > 0:
+        try:
+            from app.services.wallets import check_and_reward_referral_milestone
+            check_and_reward_referral_milestone(body.user_id, supabase)
+        except Exception as _m_err:
+            logger.warning(f"Referral milestone check failed after admin credit: {_m_err}")
+
     logger.info(
         f"[Admin] Coins adjusted for {target_user['email']}: "
         f"{old_balance} → {new_balance} (action={body.action}, amount={body.amount}, "
@@ -243,6 +258,27 @@ async def admin_adjust_coins(
 
 
 # ─── Platform Fee Settings ────────────────────────────────────────────────────
+
+@router.get("/platform-settings", response_model=ApiResponse)
+async def get_platform_settings(_: User = Depends(require_admin)):
+    data = wallets_service.get_platform_settings()
+    return ApiResponse(success=True, data=data)
+
+
+@router.put("/platform-settings", response_model=ApiResponse)
+async def update_platform_settings(
+    body: PlatformSettingsRequest,
+    admin_user: User = Depends(require_admin),
+):
+    supabase = get_supabase_admin()
+    updates = body.model_dump()
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    result = supabase.table("platform_settings").upsert({"id": 1, **updates}).execute()
+    wallets_service.invalidate_platform_settings_cache()
+    saved = result.data[0] if result.data else updates
+    logger.info(f"[Admin] Platform settings updated by {admin_user.email}: {updates}")
+    return ApiResponse(success=True, data=saved, message="Platform settings saved")
+
 
 @router.get("/fee-settings", response_model=ApiResponse)
 async def get_fee_settings(_: User = Depends(require_admin)):

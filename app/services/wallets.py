@@ -47,6 +47,38 @@ _fee_settings_cache: Dict[str, Any] = {}
 _fee_settings_ts: float = 0.0
 _FEE_SETTINGS_TTL = 60.0  # re-fetch from DB at most once per minute
 
+# ── DB-backed platform settings cache ────────────────────────────────────────
+_platform_settings_cache: Dict[str, Any] = {}
+_platform_settings_ts: float = 0.0
+
+
+def get_platform_settings() -> Dict[str, Any]:
+    """Return platform settings from DB (cached 60 s). Falls back to defaults."""
+    global _platform_settings_cache, _platform_settings_ts
+    now = time.time()
+    if _platform_settings_cache and (now - _platform_settings_ts) < _FEE_SETTINGS_TTL:
+        return _platform_settings_cache
+    try:
+        sb = get_supabase_admin()
+        result = sb.table("platform_settings").select("*").eq("id", 1).single().execute()
+        if result.data:
+            _platform_settings_cache = result.data
+            _platform_settings_ts = now
+            return _platform_settings_cache
+    except Exception as e:
+        logger.warning(f"Could not load platform_settings from DB: {e}")
+    return {
+        "mentor_registration_fee": MENTOR_REGISTRATION_FEE,
+        "mentee_registration_fee": 10.0,
+        "referral_milestone_threshold": float(REFERRAL_MILESTONE_COINS),
+        "referral_milestone_reward_pct": 10.0,
+    }
+
+
+def invalidate_platform_settings_cache() -> None:
+    global _platform_settings_ts
+    _platform_settings_ts = 0.0
+
 
 def get_fee_settings() -> Dict[str, Any]:
     """Return fee settings from DB (cached 60 s). Falls back to hardcoded constants."""
@@ -569,98 +601,116 @@ REFERRAL_MILESTONE_REWARD = 10      # referrer gets this many coins
 REFERRAL_MILESTONE_TYPE = "coins_100"
 
 
-def check_and_reward_referral_milestone(mentor_id: str, supabase=None) -> bool:
+def check_and_reward_referral_milestone(mentor_id: str, supabase=None) -> int:
     """
-    Called after every mentor wallet credit.
-    If the mentor has now earned >= 100 coins total (first time),
-    and was referred by someone, credit the referrer 10 coins.
-    Returns True if the milestone was newly triggered.
+    Called after every mentor wallet credit (recurring).
+    For each multiple of `referral_milestone_threshold` the mentor has earned,
+    credits `threshold * reward_pct / 100` coins to the referrer once per multiple.
+    E.g. threshold=100, reward_pct=10 → referrer gets 10 coins at 100, 200, 300, ...
+    Returns the number of newly rewarded milestones.
     """
     if supabase is None:
         supabase = get_supabase_admin()
     try:
-        # Already rewarded for this milestone?
-        existing = supabase.table("referral_milestones").select("id").eq(
-            "mentor_id", mentor_id
-        ).eq("milestone_type", REFERRAL_MILESTONE_TYPE).execute()
-        if existing.data:
-            return False
+        s = get_platform_settings()
+        threshold = float(s.get("referral_milestone_threshold", REFERRAL_MILESTONE_COINS))
+        reward_pct = float(s.get("referral_milestone_reward_pct", 10.0))
+        if threshold <= 0:
+            return 0
 
         # Check mentor's total earned coins
         wallet_res = supabase.table("wallets").select("total_credited").eq(
             "user_id", mentor_id
         ).eq("type", "mentorship").execute()
         if not wallet_res.data:
-            return False
+            return 0
         total_earned = float(wallet_res.data[0].get("total_credited", 0))
-        if total_earned < REFERRAL_MILESTONE_COINS:
-            return False
 
-        # Find who referred this mentor
+        # Milestones that should have been paid by now
+        expected = int(total_earned // threshold)
+        if expected == 0:
+            return 0
+
+        # Milestones already paid
+        paid_res = supabase.table("referral_milestones").select("milestone_number").eq(
+            "mentor_id", mentor_id
+        ).execute()
+        paid_count = len(paid_res.data or [])
+        if paid_count >= expected:
+            return 0
+
+        # Find referrer
         ref_res = supabase.table("mentor_registration_fees").select("referred_by_id").eq(
             "mentor_id", mentor_id
         ).eq("is_paid", True).limit(1).execute()
         if not ref_res.data or not ref_res.data[0].get("referred_by_id"):
-            return False
+            return 0
         referrer_id = ref_res.data[0]["referred_by_id"]
 
-        reward = float(REFERRAL_MILESTONE_REWARD)
+        reward_per = round(threshold * reward_pct / 100.0, 2)
+        newly_rewarded = 0
 
-        # Credit referrer's referral wallet
-        ref_wallet = get_or_create_wallet(referrer_id, "referral")
-        ref_balance = float(ref_wallet["balance"])
-        new_ref_balance = ref_balance + reward
+        for milestone_num in range(paid_count + 1, expected + 1):
+            try:
+                ref_wallet = get_or_create_wallet(referrer_id, "referral")
+                ref_balance = float(ref_wallet["balance"])
+                new_balance = ref_balance + reward_per
 
-        supabase.table("wallets").update({
-            "balance": new_ref_balance,
-            "total_credited": float(ref_wallet["total_credited"]) + reward,
-        }).eq("id", ref_wallet["id"]).execute()
+                supabase.table("wallets").update({
+                    "balance": new_balance,
+                    "total_credited": float(ref_wallet["total_credited"]) + reward_per,
+                }).eq("id", ref_wallet["id"]).execute()
 
-        supabase.table("wallet_transactions").insert({
-            "wallet_id": ref_wallet["id"],
-            "tx_type": "credit",
-            "category": "referral_commission",
-            "amount": reward,
-            "balance_after": new_ref_balance,
-            "related_user_id": mentor_id,
-            "description": (
-                f"Referral milestone reward: {reward} coins "
-                f"(your referred mentor earned {REFERRAL_MILESTONE_COINS}+ coins)"
-            ),
-        }).execute()
+                supabase.table("wallet_transactions").insert({
+                    "wallet_id": ref_wallet["id"],
+                    "tx_type": "credit",
+                    "category": "referral_commission",
+                    "amount": reward_per,
+                    "balance_after": new_balance,
+                    "related_user_id": mentor_id,
+                    "description": (
+                        f"Referral milestone #{milestone_num}: {reward_per} coins "
+                        f"(mentor total ≥ {int(milestone_num * threshold)} coins)"
+                    ),
+                }).execute()
 
-        # Record milestone so it triggers exactly once
-        supabase.table("referral_milestones").insert({
-            "mentor_id": mentor_id,
-            "milestone_type": REFERRAL_MILESTONE_TYPE,
-            "referrer_id": referrer_id,
-            "reward_coins": reward,
-        }).execute()
+                supabase.table("referral_milestones").insert({
+                    "mentor_id": mentor_id,
+                    "milestone_type": f"coins_{int(milestone_num * threshold)}",
+                    "milestone_number": milestone_num,
+                    "referrer_id": referrer_id,
+                    "reward_coins": reward_per,
+                }).execute()
 
-        # Notify referrer
-        try:
-            supabase.table("notifications").insert({
-                "user_id": referrer_id,
-                "type": "payment",
-                "title": "Referral Milestone Reward!",
-                "message": (
-                    f"A mentor you referred has earned {REFERRAL_MILESTONE_COINS} coins! "
-                    f"You've received {int(reward)} Avittam Coins as a reward."
-                ),
-                "action_url": "/#wallet",
-            }).execute()
-        except Exception as _n:
-            logger.warning(f"Referral milestone notification failed: {_n}")
+                try:
+                    supabase.table("notifications").insert({
+                        "user_id": referrer_id,
+                        "type": "payment",
+                        "title": f"Referral Milestone #{milestone_num} Reward!",
+                        "message": (
+                            f"A mentor you referred has earned "
+                            f"{int(milestone_num * threshold)} coins total! "
+                            f"You received {reward_per:.0f} Avittam Coins."
+                        ),
+                        "action_url": "/#wallet",
+                    }).execute()
+                except Exception as _n:
+                    logger.warning(f"Milestone notification failed: {_n}")
 
-        logger.info(
-            f"Referral milestone '{REFERRAL_MILESTONE_TYPE}': "
-            f"mentor={mentor_id}, referrer={referrer_id}, reward={reward} coins"
-        )
-        return True
+                newly_rewarded += 1
+            except Exception as e:
+                logger.warning(f"Milestone #{milestone_num} reward failed for mentor {mentor_id}: {e}")
+
+        if newly_rewarded:
+            logger.info(
+                f"Rewarded {newly_rewarded} milestone(s): mentor={mentor_id}, "
+                f"referrer={referrer_id}, {reward_per} coins each"
+            )
+        return newly_rewarded
 
     except Exception as e:
         logger.warning(f"check_and_reward_referral_milestone failed: {e}")
-        return False
+        return 0
 
 
 # =====================================================
