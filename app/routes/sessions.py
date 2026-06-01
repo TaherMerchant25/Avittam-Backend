@@ -82,7 +82,7 @@ async def book_session_with_coins(body: BookWithCoinsBody, user: User = Depends(
         session_id=session_id,
         mentor_id=body.mentorId,
         total_coins=body.totalCoins,
-        settle_immediately=True,
+        settle_immediately=False,  # deferred: mentor paid after student rates
     )
 
     # Mark the originating mentor_request as 'booked' so it never resurfaces for the student
@@ -183,7 +183,8 @@ async def verify_session_booking(body: VerifyBookBody, user: User = Depends(requ
         "paid_at": datetime.now().isoformat(),
     }).eq("id", body.paymentId).eq("session_id", body.sessionId).execute()
 
-    # Fetch payment to get amount, then credit mentor's wallet (70% of fee)
+    # Fetch payment amount; create unsettled session_coin_payments record.
+    # Mentor is paid after the student submits a rating (submit_nps_rating settles it).
     payment_result = supabase.table("payments").select("amount").eq(
         "id", body.paymentId
     ).single().execute()
@@ -193,13 +194,20 @@ async def verify_session_booking(body: VerifyBookBody, user: User = Depends(requ
             "mentor_id, mentee_id"
         ).eq("id", body.sessionId).single().execute()
         if session_result_for_credit.data:
-            credit_mentor_for_session_payment(
-                mentor_id=session_result_for_credit.data["mentor_id"],
-                session_id=body.sessionId,
-                amount_inr=amount_inr,
-                mentee_id=session_result_for_credit.data["mentee_id"],
-                description="Session earning (Razorpay payment)",
-            )
+            sess = session_result_for_credit.data
+            existing_scp = supabase.table("session_coin_payments").select("id").eq(
+                "session_id", body.sessionId
+            ).execute()
+            if not existing_scp.data:
+                supabase.table("session_coin_payments").insert({
+                    "session_id": body.sessionId,
+                    "mentee_id": sess["mentee_id"],
+                    "mentor_id": sess["mentor_id"],
+                    "total_coins": amount_inr,   # 1 INR = 1 coin
+                    "platform_fee_coins": 0,
+                    "mentor_earning_coins": 0,
+                    "is_settled": False,
+                }).execute()
 
     session_result = supabase.table("sessions").select(
         "id, mentor_id, mentee_id, mentor:users!mentor_id(id, name, avatar_url), mentee:users!mentee_id(id, name, avatar_url)"
