@@ -756,15 +756,27 @@ def submit_nps_rating(
         platform_fee = total * (fee_pct / 100.0)
         mentor_earning = total - platform_fee
         
-        # Update session_coin_payments
+        # Update session_coin_payments — omit nps_rating_id here to avoid FK
+        # visibility race; set it in a follow-up update after confirming row exists.
         supabase.table("session_coin_payments").update({
             "platform_fee_coins": platform_fee,
             "mentor_earning_coins": mentor_earning,
-            "nps_rating_id": nps_id,
             "platform_fee_pct": fee_pct,
             "is_settled": True,
             "settled_at": datetime.now().isoformat(),
         }).eq("id", scp["id"]).execute()
+
+        # Link nps_rating_id only if the row is actually visible
+        try:
+            nps_exists = supabase.table("nps_ratings").select("id").eq(
+                "id", nps_id
+            ).execute()
+            if nps_exists.data:
+                supabase.table("session_coin_payments").update({
+                    "nps_rating_id": nps_id,
+                }).eq("id", scp["id"]).execute()
+        except Exception as _link_err:
+            logger.warning(f"Could not link nps_rating_id {nps_id}: {_link_err}")
         
         # Credit mentor's mentorship wallet
         mentor_wallet = get_or_create_wallet(rated_mentor_id, "mentorship")
