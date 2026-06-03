@@ -257,6 +257,100 @@ async def admin_adjust_coins(
     )
 
 
+# ─── Session Management ───────────────────────────────────────────────────────
+
+@router.get("/sessions", response_model=ApiResponse)
+async def admin_list_sessions(
+    status: Optional[str] = None,
+    user_id: Optional[str] = None,
+    limit: int = 50,
+    _: User = Depends(require_admin),
+):
+    """List sessions for admin — filter by status and/or user."""
+    supabase = get_supabase_admin()
+    query = supabase.table("sessions").select(
+        "id, status, scheduled_at, ended_at, duration_minutes, "
+        "mentor_id, mentee_id, request_id, "
+        "mentor:users!mentor_id(id, name, email), "
+        "mentee:users!mentee_id(id, name, email)"
+    ).order("scheduled_at", desc=True).limit(limit)
+
+    if status:
+        query = query.eq("status", status)
+    if user_id:
+        query = query.or_(f"mentor_id.eq.{user_id},mentee_id.eq.{user_id}")
+
+    result = query.execute()
+    return ApiResponse(success=True, data=result.data or [])
+
+
+@router.post("/sessions/{session_id}/terminate", response_model=ApiResponse)
+async def admin_terminate_session(
+    session_id: str,
+    admin_user: User = Depends(require_admin),
+):
+    """Cancel an active session and refund unsettled coins to the student."""
+    supabase = get_supabase_admin()
+
+    sess = supabase.table("sessions").select(
+        "id, status, mentor_id, mentee_id"
+    ).eq("id", session_id).single().execute()
+
+    if not sess.data:
+        raise NotFoundError("Session not found")
+    if sess.data["status"] in ("completed", "cancelled"):
+        raise BadRequestError(f"Session already {sess.data['status']}")
+
+    # Cancel session
+    supabase.table("sessions").update({
+        "status": "cancelled",
+        "ended_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", session_id).execute()
+
+    # Refund unsettled coins to student
+    scp = supabase.table("session_coin_payments").select("*").eq(
+        "session_id", session_id
+    ).eq("is_settled", False).execute()
+
+    refunded = 0.0
+    if scp.data:
+        coins = float(scp.data[0]["total_coins"] or 0)
+        mentee_id = scp.data[0]["mentee_id"]
+        if coins > 0:
+            from app.services.wallets import get_or_create_wallet
+            wallet = get_or_create_wallet(mentee_id, "student")
+            new_bal = float(wallet["balance"]) + coins
+            supabase.table("wallets").update({
+                "balance": new_bal,
+                "total_credited": float(wallet["total_credited"]) + coins,
+            }).eq("id", wallet["id"]).execute()
+            supabase.table("wallet_transactions").insert({
+                "wallet_id": wallet["id"],
+                "tx_type": "credit",
+                "category": "refund",
+                "amount": coins,
+                "balance_after": new_bal,
+                "session_id": session_id,
+                "description": f"[Admin] Session cancelled — {coins} coins refunded",
+                "metadata": {"admin_id": admin_user.id, "admin_email": admin_user.email},
+            }).execute()
+            supabase.table("session_coin_payments").update({
+                "is_settled": True,
+                "settled_at": datetime.now(timezone.utc).isoformat(),
+                "mentor_earning_coins": 0,
+                "platform_fee_coins": coins,
+            }).eq("id", scp.data[0]["id"]).execute()
+            refunded = coins
+
+    logger.info(f"[Admin] Session {session_id} terminated by {admin_user.email}, refunded {refunded} coins")
+    return ApiResponse(
+        success=True,
+        data={"session_id": session_id, "refunded_coins": refunded},
+        message=f"Session cancelled. {refunded:.0f} coins refunded to student." if refunded else "Session cancelled.",
+    )
+
+
 # ─── Platform Fee Settings ────────────────────────────────────────────────────
 
 @router.get("/platform-settings", response_model=ApiResponse)
